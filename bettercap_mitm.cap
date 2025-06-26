@@ -1,0 +1,23 @@
+# Bettercap MITM Script with Banner
+
+events.stream off
+clear
+
+# Show banner
+events.on session.start do
+    puts "\n"
+    puts "   ____        _   _   _      __ _    ____    _    __  __ _____ "
+    puts "  | __ )  ___ | |_| | | |    / /| |  / ___|  / \  |  \/  | ____|"
+    puts "  |  _ \ / _ \| __| |_| |   / / | | | |     / _ \ | |\/| |  _|  "
+    puts "  | |_) | (_) | |_|  _  |  / /  | | | |___ / ___ \| |  | | |___ "
+    puts "  |____/ \___/ \__|_| |_| /_/   |_|  \____/_/   \_\_|  |_|_____|"
+    puts "\n"
+    puts "                      MITM Attack Module\n"
+    puts "  Target     : $arp.spoof.targets"
+    puts "  Interface  : $net.iface"
+    puts "  Gateway    : $net.gateway"
+    puts "  Local IP   : $net.ip"
+    puts "\n"
+end
+
+# Rest of the configuration remains the same...
