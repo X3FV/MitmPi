@@ -215,7 +215,7 @@ class MITMTool:
             
         # Simple subnet calculation (for /24 networks)
         if netmask == "255.255.255.0":
-            return ".".join(ip.split(".")[:3] + ".0/24"
+            return ".".join(ip.split(".")[:3]) + ".0/24"
         return None
 
     def arp_spoof(self, target_ip, gateway_ip):
