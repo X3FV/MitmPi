@@ -21,166 +21,188 @@ ASCII_ART = r"""
  Raspberry Pi MITM Network Auditing Tool
 """
 
-# Configuration and rest of the imports remain the same...
+# Configuration
+CONFIG_FILE = "/etc/mitm_tool/config.json"
+LOG_FILE = "/var/log/mitm_tool.log"
+DATA_DIR = "/var/lib/mitm_tool/captures"
+REMOTE_UPLOAD_URL = "https://your-remote-endpoint.com/api/upload"
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(LOG_FILE),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
 
 class MITMTool:
-    # ... (previous methods remain the same until interactive_menu)
-    
-    def show_main_menu(self):
-        """Display the main menu with ASCII art"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" MAIN MENU".center(50))
-        print("="*50)
-        print("\n1. Network Scanning Tools")
-        print("2. MITM Attack Tools")
-        print("3. Packet Capture & Analysis")
-        print("4. Credential Harvesting")
-        print("5. System Configuration")
-        print("6. Stop All Attacks")
-        print("7. Exit")
+    def __init__(self):
+        self.load_config()
+        self.check_safety()
+        self.setup_environment()
+        self.interfaces = {}
+        self.targets = []
+        self.capture_processes = {}
         
-    def show_scan_menu(self):
-        """Display network scanning menu"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" NETWORK SCANNING MENU".center(50))
-        print("="*50)
-        print("\n1. Quick ARP Scan (arp-scan)")
-        print("2. Comprehensive Nmap Scan")
-        print("3. Ping Sweep")
-        print("4. Return to Main Menu")
-        
-    def show_mitm_menu(self):
-        """Display MITM attack menu"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" MITM ATTACK MENU".center(50))
-        print("="*50)
-        print("\n1. ARP Spoofing")
-        print("2. DNS Spoofing (via bettercap)")
-        print("3. SSL Stripping")
-        print("4. Return to Main Menu")
-        
-    def show_capture_menu(self):
-        """Display packet capture menu"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" PACKET CAPTURE MENU".center(50))
-        print("="*50)
-        print("\n1. Start TCPDump Capture")
-        print("2. View Active Captures")
-        print("3. Stop All Captures")
-        print("4. Return to Main Menu")
-        
-    def show_credential_menu(self):
-        """Display credential harvesting menu"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" CREDENTIAL HARVESTING MENU".center(50))
-        print("="*50)
-        print("\n1. Start Responder (NTLM/LLMNR)")
-        print("2. Start Bettercap (HTTP/SMB)")
-        print("3. View Captured Credentials")
-        print("4. Return to Main Menu")
-        
-    def show_config_menu(self):
-        """Display configuration menu"""
-        os.system('clear' if os.name == 'posix' else 'cls')
-        print(ASCII_ART)
-        print("\n" + "="*50)
-        print(" CONFIGURATION MENU".center(50))
-        print("="*50)
-        print("\n1. Configure Allowed Networks")
-        print("2. Toggle Remote Upload")
-        print("3. View Current Configuration")
-        print("4. Return to Main Menu")
+    def load_config(self):
+        """Load configuration from file"""
+        try:
+            with open(CFIG_FILE) as f:
+                self.config = json.load(f)
+            logger.info("Configuration loaded successfully")
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.config = {
+                "remote_upload": False,
+                "auto_start": False,
+                "allowed_networks": [],
+                "legal_disclaimer_accepted": False
+            }
+            logger.warning("Using default configuration")
 
-    def interactive_menu(self):
-        """Enhanced interactive menu with submenus"""
-        while True:
-            self.show_main_menu()
-            choice = input("\nSelect an option (1-7): ").strip()
+    def check_safety(self):
+        """Display legal disclaimers and safety checks"""
+        disclaimer = """
+        WARNING: This tool is for authorized security auditing and penetration testing only.
+        Unauthorized use is illegal and unethical. By using this tool, you agree that:
+        
+        1. You have explicit permission to test the network you're targeting
+        2. You understand the legal implications of network monitoring
+        3. You will not use this tool for malicious purposes
+        
+        The developers assume no liability for misuse of this software.
+        """
+        
+        print(disclaimer)
+        
+        if not self.config.get("legal_disclaimer_accepted", False):
+            response = input("Do you accept these terms? (yes/no): ").strip().lower()
+            if response != "yes":
+                print("Exiting...")
+                sys.exit(0)
             
-            try:
-                if choice == "1":  # Network Scanning
-                    self.handle_scan_menu()
-                elif choice == "2":  # MITM Attacks
-                    self.handle_mitm_menu()
-                elif choice == "3":  # Packet Capture
-                    self.handle_capture_menu()
-                elif choice == "4":  # Credential Harvesting
-                    self.handle_credential_menu()
-                elif choice == "5":  # Configuration
-                    self.handle_config_menu()
-                elif choice == "6":  # Stop All
-                    self.stop_all_attacks()
-                    input("\nPress Enter to continue...")
-                elif choice == "7":  # Exit
-                    self.stop_all_attacks()
-                    print("\nGoodbye!")
-                    break
-                else:
-                    print("Invalid choice")
-                    time.sleep(1)
-                    
-            except KeyboardInterrupt:
-                print("\nOperation cancelled")
-                time.sleep(1)
-            except Exception as e:
-                logger.error(f"Error: {str(e)}")
-                time.sleep(2)
+            self.config["legal_disclaimer_accepted"] = True
+            self.save_config()
 
-    def handle_scan_menu(self):
-        """Handle network scanning menu"""
-        while True:
-            self.show_scan_menu()
-            choice = input("\nSelect an option (1-4): ").strip()
+    def save_config(self):
+        """Save configuration to file"""
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(self.config, f, indent=4)
+
+    def setup_environment(self):
+        """Create necessary directories and check dependencies"""
+        os.makedirs(DATA_DIR, exist_ok=True)
+        
+        # Check for required tools
+        required_tools = [
+            'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
+            'bettercap', 'responder', 'tailscale'
+        ]
+        
+        missing_tools = []
+        for tool in required_tools:
+            if not self.check_tool_installed(tool):
+                missing_tools.append(tool)
+                
+        if missing_tools:
+            logger.error(f"Missing required tools: {', '.join(missing_tools)}")
+            sys.exit(1)
+
+    def check_tool_installed(self, tool):
+        """Check if a command line tool is installed"""
+        try:
+            subprocess.run(["which", tool], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def detect_interfaces(self):
+        """Detect available network interfaces"""
+        self.interfaces = {}
+        try:
+            interfaces = netifaces.interfaces()
             
-            if choice == "1":
-                self.network_scan()
-                input("\nPress Enter to continue...")
-            elif choice == "2":
-                self.run_comprehensive_nmap()
-                input("\nPress Enter to continue...")
-            elif choice == "3":
-                self.run_ping_sweep()
-                input("\nPress Enter to continue...")
-            elif choice == "4":
-                break
-            else:
-                print("Invalid choice")
-                time.sleep(1)
-
-    def handle_mitm_menu(self):
-        """Handle MITM attack menu"""
-        while True:
-            self.show_mitm_menu()
-            choice = input("\nSelect an option (1-4): ").strip()
+            for iface in interfaces:
+                if iface.startswith('eth') or iface.startswith('en'):
+                    addrs = netifaces.ifaddresses(iface)
+                    if netifaces.AF_INET in addrs:
+                        ip_info = addrs[netifaces.AF_INET][0]
+                        self.interfaces[iface] = {
+                            'ip': ip_info.get('addr', ''),
+                            'netmask': ip_info.get('netmask', ''),
+                            'mac': addrs[netifaces.AF_LINK][0]['addr'] if netifaces.AF_LINK in addrs else ''
+                        }
             
-            if choice == "1":
-                target = input("Enter target IP: ").strip()
-                gateway = input("Enter gateway IP: ").strip()
-                self.arp_spoof(target, gateway)
-                input("\nPress Enter to continue...")
-            elif choice == "2":
-                self.start_dns_spoofing()
-                input("\nPress Enter to continue...")
-            elif choice == "3":
-                self.start_ssl_stripping()
-                input("\nPress Enter to continue...")
-            elif choice == "4":
-                break
-            else:
-                print("Invalid choice")
-                time.sleep(1)
+            logger.info(f"Detected interfaces: {json.dumps(self.interfaces, indent=2)}")
+            return len(self.interfaces) >= 2  # Need at least two interfaces for bridging
+            
+        except Exception as e:
+            logger.error(f"Error detecting interfaces: {str(e)}")
+            return False
 
-    # ... (similar handler methods for other menus)
+    def setup_bridge(self):
+        """Bridge two Ethernet interfaces"""
+        if len(self.interfaces) < 2:
+            logger.error("Need at least two interfaces to create a bridge")
+            return False
+            
+        iface1, iface2 = list(self.interfaces.keys())[:2]
+        
+        try:
+            # Disable IP on interfaces
+            subprocess.run(["sudo", "ifconfig", iface1, "0.0.0.0"], check=True)
+            subprocess.run(["sudo", "ifconfig", iface2, "0.0.0.0"], check=True)
+            
+            # Create bridge
+            subprocess.run(["sudo", "brctl", "addbr", "mitm-bridge"], check=True)
+            subprocess.run(["sudo", "brctl", "addif", "mitm-bridge", iface1], check=True)
+            subprocess.run(["sudo", "brctl", "addif", "mitm-bridge", iface2], check=True)
+            
+            # Bring up bridge
+            subprocess.run(["sudo", "ifconfig", "mitm-bridge", "up"], check=True)
+            
+            logger.info(f"Successfully bridged {iface1} and {iface2} via mitm-bridge")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to create bridge: {str(e)}")
+            return False
+
+    def network_scan(self):
+        """Perform network scan using nmap and arp-scan"""
+        if not self.interfaces:
+            logger.error("No interfaces detected")
+            return
+            
+        interface = list(self.interfaces.keys())[0]
+        
+        try:
+            # ARP scan for live hosts
+            logger.info("Running ARP scan...")
+            arp_scan = subprocess.run(
+                ["sudo", "arp-scan", "--interface", interface, "--localnet"],
+                capture_output=True, text=True
+            )
+            print(arp_scan.stdout)
+            
+            # Nmap scan for services
+            logger.info("Running Nmap scan...")
+            subnet = self.get_subnet(interface)
+            if subnet:
+                nmap_scan = subprocess.run(
+                    ["sudo", "nmap", "-sV", "-O", subnet],
+                    capture_output=True, text=True
+                )
+                print(nmap_scan.stdout)
+                
+        except Exception as e:
+            logger.error(f"Scanning failed: {str(e)}")
+
+    # ... [Rest of the methods remain the same as in the original script]
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
