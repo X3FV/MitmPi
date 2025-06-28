@@ -101,7 +101,8 @@ class MITMTool:
         # Check for required tools
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
-            'bettercap', 'responder', 'tailscale', 'iwlist'
+            'bettercap', 'responder', 'tailscale', 'iwlist',
+            'brctl', 'ifconfig', 'arp'
         ]
         
         missing_tools = []
@@ -368,10 +369,123 @@ class MITMTool:
             logger.error(f"Upload failed: {str(e)}")
             return False
 
-    # WiFi Functions
-    def get_wifi_interfaces(self):
-        """Get available WiFi interfaces"""
-        return [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'wifi']
+    # ==================== WiFi Functions ====================
+    def get_connected_wifi_devices(self, interface):
+        """Get devices connected to WiFi network using multiple methods"""
+        try:
+            logger.info(f"Checking connected devices on {interface}...")
+            devices = []
+            
+            # Method 1: ARP table
+            try:
+                arp_result = subprocess.run(
+                    ["arp", "-a", "-i", interface],
+                    capture_output=True, text=True
+                )
+                devices.extend(self.parse_arp_output(arp_result.stdout))
+            except Exception as e:
+                logger.warning(f"ARP scan failed: {str(e)}")
+
+            # Method 2: DHCP leases
+            try:
+                with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
+                    dhcp_leases = f.readlines()
+                devices.extend(self.parse_dhcp_leases(dhcp_leases))
+            except Exception as e:
+                logger.warning(f"DHCP leases read failed: {str(e)}")
+
+            # Method 3: nmap scan (active)
+            try:
+                subnet = self.get_subnet(interface)
+                if subnet:
+                    nmap_result = subprocess.run(
+                        ["sudo", "nmap", "-sn", subnet],
+                        capture_output=True, text=True
+                    )
+                    devices.extend(self.parse_nmap_scan(nmap_result.stdout))
+            except Exception as e:
+                logger.warning(f"Nmap scan failed: {str(e)}")
+
+            # Method 4: ping sweep (fallback)
+            try:
+                if not devices and subnet:
+                    ping_result = subprocess.run(
+                        ["sudo", "nmap", "-sn", "-PE", subnet],
+                        capture_output=True, text=True
+                    )
+                    devices.extend(self.parse_nmap_scan(ping_result.stdout))
+            except Exception as e:
+                logger.warning(f"Ping sweep failed: {str(e)}")
+
+            # Deduplicate devices by MAC address
+            unique_devices = {}
+            for device in devices:
+                if 'mac' in device and device['mac']:
+                    unique_devices[device['mac']] = device
+                elif 'ip' in device and device['ip']:
+                    unique_devices[device['ip']] = device
+
+            return list(unique_devices.values())
+            
+        except Exception as e:
+            logger.error(f"Failed to get connected devices: {str(e)}")
+            return []
+
+    def parse_arp_output(self, arp_output):
+        """Parse ARP table output"""
+        devices = []
+        for line in arp_output.split('\n'):
+            if "ether" in line:
+                parts = line.split()
+                devices.append({
+                    'ip': parts[1].strip('()'),
+                    'mac': parts[3].lower(),
+                    'interface': parts[5],
+                    'method': 'arp'
+                })
+        return devices
+
+    def parse_dhcp_leases(self, dhcp_leases):
+        """Parse DHCP leases file"""
+        devices = []
+        for lease in dhcp_leases:
+            parts = lease.strip().split()
+            if len(parts) >= 4:
+                devices.append({
+                    'ip': parts[2],
+                    'mac': parts[1].lower(),
+                    'hostname': parts[3],
+                    'method': 'dhcp'
+                })
+        return devices
+
+    def parse_nmap_scan(self, nmap_output):
+        """Parse nmap scan output"""
+        devices = []
+        current_ip = None
+        current_mac = None
+        
+        for line in nmap_output.split('\n'):
+            if "Nmap scan report for" in line:
+                current_ip = line.split()[-1].strip('()')
+            elif "MAC Address:" in line:
+                current_mac = line.split("MAC Address: ")[1].split()[0].lower()
+                if current_ip and current_mac:
+                    devices.append({
+                        'ip': current_ip,
+                        'mac': current_mac,
+                        'method': 'nmap'
+                    })
+                    current_ip = None
+                    current_mac = None
+            elif "Host is up" in line and current_ip and not current_mac:
+                devices.append({
+                    'ip': current_ip,
+                    'method': 'ping'
+                })
+                current_ip = None
+                
+        return devices
 
     def scan_wifi_networks(self, interface):
         """Scan for available WiFi networks"""
@@ -381,107 +495,37 @@ class MITMTool:
                 ["sudo", "iwlist", interface, "scan"],
                 capture_output=True, text=True
             )
-            return self.parse_wifi_scan(scan_result.stdout)
+            networks = []
+            current_net = {}
+            
+            for line in scan_result.stdout.split('\n'):
+                line = line.strip()
+                if "Cell" in line and "- Address:" in line:
+                    if current_net:
+                        networks.append(current_net)
+                    current_net = {'mac': line.split("Address: ")[1]}
+                elif "ESSID:" in line:
+                    current_net['ssid'] = line.split('"')[1]
+                elif "Channel:" in line:
+                    current_net['channel'] = line.split(":")[1]
+                elif "Quality=" in line:
+                    match = re.search(r'Quality=(\d+/\d+)', line)
+                    if match:
+                        current_net['quality'] = match.group(1)
+                    match = re.search(r'level=(-?\d+)', line)
+                    if match:
+                        current_net['signal'] = match.group(1)
+            
+            if current_net:
+                networks.append(current_net)
+                
+            return networks
+            
         except Exception as e:
             logger.error(f"WiFi scan failed: {str(e)}")
             return []
 
-    def parse_wifi_scan(self, scan_output):
-        """Parse iwlist scan output"""
-        networks = []
-        current_network = {}
-        
-        for line in scan_output.split('\n'):
-            line = line.strip()
-            
-            if "Cell" in line and "- Address:" in line:
-                if current_network:
-                    networks.append(current_network)
-                    current_network = {}
-                current_network['mac'] = line.split("Address: ")[1]
-            elif "ESSID:" in line:
-                current_network['ssid'] = line.split('"')[1]
-            elif "Channel:" in line:
-                current_network['channel'] = line.split(":")[1]
-            elif "Quality=" in line:
-                match = re.search(r'Quality=(\d+/\d+)', line)
-                if match:
-                    current_network['quality'] = match.group(1)
-                match = re.search(r'level=(-?\d+)', line)
-                if match:
-                    current_network['signal'] = match.group(1)
-        
-        if current_network:
-            networks.append(current_network)
-            
-        return networks
-
-    def get_connected_wifi_devices(self, interface):
-        """Get devices connected to WiFi network"""
-        try:
-            logger.info(f"Checking connected devices on {interface}...")
-            
-            # Get ARP table
-            arp_result = subprocess.run(
-                ["arp", "-a", "-i", interface],
-                capture_output=True, text=True
-            )
-            
-            # Get DHCP leases
-            dhcp_leases = []
-            try:
-                with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
-                    dhcp_leases = f.readlines()
-            except:
-                pass
-                
-            return self.parse_connected_devices(arp_result.stdout, dhcp_leases)
-            
-        except Exception as e:
-            logger.error(f"Failed to get connected devices: {str(e)}")
-            return []
-
-    def parse_connected_devices(self, arp_output, dhcp_leases):
-        """Parse ARP and DHCP data for connected devices"""
-        devices = []
-        
-        # Parse ARP table
-        for line in arp_output.split('\n'):
-            if "ether" in line:
-                parts = line.split()
-                devices.append({
-                    'ip': parts[1].strip('()'),
-                    'mac': parts[3],
-                    'interface': parts[5]
-                })
-        
-        # Add DHCP lease info
-        for lease in dhcp_leases:
-            parts = lease.strip().split()
-            if len(parts) >= 4:
-                mac = parts[1]
-                ip = parts[2]
-                hostname = parts[3]
-                
-                # Update existing device or add new
-                found = False
-                for device in devices:
-                    if device['mac'] == mac:
-                        device['hostname'] = hostname
-                        found = True
-                        break
-                
-                if not found:
-                    devices.append({
-                        'ip': ip,
-                        'mac': mac,
-                        'hostname': hostname,
-                        'interface': 'DHCP'
-                    })
-        
-        return devices
-
-    # Menu Functions
+    # ==================== Menu Functions ====================
     def show_main_menu(self):
         """Display the main menu with ASCII art"""
         os.system('clear' if os.name == 'posix' else 'cls')
@@ -511,7 +555,7 @@ class MITMTool:
 
     def handle_wifi_menu(self):
         """Handle WiFi scanning menu"""
-        wifi_ifaces = self.get_wifi_interfaces()
+        wifi_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'wifi']
         if not wifi_ifaces:
             print("\nNo WiFi interfaces found!")
             time.sleep(2)
@@ -528,7 +572,7 @@ class MITMTool:
                 print("\nAvailable WiFi Networks:")
                 for i, net in enumerate(networks, 1):
                     print(f"{i}. {net.get('ssid', 'Hidden')} (MAC: {net.get('mac')})")
-                    print(f"   Channel: {net.get('channel')}, Signal: {net.get('signal')} dBm")
+                    print(f"   Channel: {net.get('channel')}, Signal: {net.get('signal', '?')} dBm")
                 input("\nPress Enter to continue...")
                 
             elif choice == "2":
@@ -538,6 +582,7 @@ class MITMTool:
                     print(f"{i}. IP: {dev.get('ip')}, MAC: {dev.get('mac')}")
                     if 'hostname' in dev:
                         print(f"   Hostname: {dev.get('hostname')}")
+                    print(f"   Detected via: {dev.get('method')}")
                 input("\nPress Enter to continue...")
                 
             elif choice == "3":
@@ -562,7 +607,10 @@ class MITMTool:
                     self.arp_spoof(target, gateway)
                     input("\nPress Enter to continue...")
                 elif choice == "3":
-                    self.start_packet_capture()
+                    filename = input(f"Enter filename (default: {DATA_DIR}/capture_<timestamp>.pcap): ").strip()
+                    if not filename:
+                        filename = None
+                    self.start_packet_capture(filename=filename)
                     input("\nPress Enter to continue...")
                 elif choice == "4":
                     self.start_responder()
@@ -601,9 +649,8 @@ if __name__ == "__main__":
         
     tool = MITMTool()
     
-    # Detect interfaces
+    # Detect interfaces and setup bridge if possible
     if tool.detect_interfaces():
-        # Only setup bridge if we have Ethernet interfaces
         ethernet_ifaces = [iface for iface in tool.interfaces if tool.interfaces[iface]['type'] == 'ethernet']
         if len(ethernet_ifaces) >= 2:
             if tool.setup_bridge():
