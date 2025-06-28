@@ -60,7 +60,7 @@ class MITMTool:
         try:
             # Download if file doesn't exist or is older than 30 days
             if not os.path.exists(MAC_VENDOR_CACHE) or \
-               (time.time() - os.path.getmtime(MAC_VENDOR_CACHE) > 2592000:
+               if not os.path.exists(MAC_VENDOR_CACHE) or (time.time() - os.path.getmtime(MAC_VENDOR_CACHE)) > 2592000:
                 logger.info("Downloading MAC vendor database...")
                 urllib.request.urlretrieve(MAC_VENDOR_DB_URL, MAC_VENDOR_CACHE + ".new")
                 shutil.move(MAC_VENDOR_CACHE + ".new", MAC_VENDOR_CACHE)
