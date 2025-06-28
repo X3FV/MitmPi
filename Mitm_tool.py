@@ -10,6 +10,8 @@ import netifaces
 import requests
 import readline
 import re
+import urllib.request
+import shutil
 
 # ASCII Art
 ASCII_ART = r"""
@@ -27,6 +29,8 @@ CONFIG_FILE = "/etc/mitm_tool/config.json"
 LOG_FILE = "/var/log/mitm_tool.log"
 DATA_DIR = "/var/lib/mitm_tool/captures"
 REMOTE_UPLOAD_URL = "https://your-remote-endpoint.com/api/upload"
+MAC_VENDOR_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
+MAC_VENDOR_CACHE = "/tmp/mac_vendors.txt"
 
 # Setup logging
 logging.basicConfig(
@@ -48,7 +52,77 @@ class MITMTool:
         self.interfaces = {}
         self.targets = []
         self.capture_processes = {}
+        self.mac_vendors = {}
+        self.load_mac_vendors()
         
+    def load_mac_vendors(self):
+        """Load MAC vendor database for device identification"""
+        try:
+            # Download if file doesn't exist or is older than 30 days
+            if not os.path.exists(MAC_VENDOR_CACHE) or \
+               (time.time() - os.path.getmtime(MAC_VENDOR_CACHE) > 2592000:
+                logger.info("Downloading MAC vendor database...")
+                urllib.request.urlretrieve(MAC_VENDOR_DB_URL, MAC_VENDOR_CACHE + ".new")
+                shutil.move(MAC_VENDOR_CACHE + ".new", MAC_VENDOR_CACHE)
+
+            with open(MAC_VENDOR_CACHE, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    if "(base 16)" in line:
+                        parts = line.split("(base 16)")
+                        mac_prefix = parts[0].strip().replace('-', ':')
+                        vendor = parts[1].strip()
+                        self.mac_vendors[mac_prefix] = vendor
+            logger.info(f"Loaded {len(self.mac_vendors)} MAC vendors")
+        except Exception as e:
+            logger.error(f"Failed to load MAC vendors: {str(e)}")
+
+    def get_device_type(self, mac):
+        """Identify device type from MAC address"""
+        if not mac or not self.mac_vendors:
+            return "Unknown"
+        
+        # Standardize MAC format
+        mac = mac.upper().replace('-', ':')
+        if len(mac) < 8:  # Need at least first 6 chars (OUI)
+            return "Unknown"
+        
+        # Check first 6 chars (OUI)
+        oui = mac[:8]
+        if oui in self.mac_vendors:
+            vendor = self.mac_vendors[oui]
+            
+            # Common device mappings
+            if "Apple" in vendor:
+                return "Apple Device"
+            elif "Samsung" in vendor:
+                return "Samsung Device"
+            elif "Amazon" in vendor:
+                return "Amazon Device (Alexa/Echo)"
+            elif "Google" in vendor:
+                return "Google Device (Nest/Home)"
+            elif "Raspberry" in vendor:
+                return "Raspberry Pi"
+            elif "TP-Link" in vendor:
+                return "TP-Link Device"
+            elif "Xiaomi" in vendor:
+                return "Xiaomi Device"
+            elif "Dell" in vendor:
+                return "Dell Computer"
+            elif "LG" in vendor:
+                return "LG Device"
+            elif "Sony" in vendor:
+                return "Sony Device"
+            elif "Microsoft" in vendor:
+                return "Microsoft Device"
+            elif "Huawei" in vendor:
+                return "Huawei Device"
+            elif "Intel" in vendor:
+                return "Intel Device"
+            elif "ASUS" in vendor:
+                return "ASUS Device"
+            return vendor
+        return "Unknown"
+
     def load_config(self):
         """Load configuration from file"""
         try:
@@ -369,7 +443,6 @@ class MITMTool:
             logger.error(f"Upload failed: {str(e)}")
             return False
 
-    # ==================== WiFi Functions ====================
     def get_connected_wifi_devices(self, interface):
         """Get devices connected to WiFi network using multiple methods"""
         try:
@@ -432,35 +505,41 @@ class MITMTool:
             return []
 
     def parse_arp_output(self, arp_output):
-        """Parse ARP table output"""
+        """Parse ARP table output with device identification"""
         devices = []
         for line in arp_output.split('\n'):
             if "ether" in line:
                 parts = line.split()
+                mac = parts[3].lower()
+                device_type = self.get_device_type(mac)
                 devices.append({
                     'ip': parts[1].strip('()'),
-                    'mac': parts[3].lower(),
+                    'mac': mac,
+                    'type': device_type,
                     'interface': parts[5],
                     'method': 'arp'
                 })
         return devices
 
     def parse_dhcp_leases(self, dhcp_leases):
-        """Parse DHCP leases file"""
+        """Parse DHCP leases file with device identification"""
         devices = []
         for lease in dhcp_leases:
             parts = lease.strip().split()
             if len(parts) >= 4:
+                mac = parts[1].lower()
+                device_type = self.get_device_type(mac)
                 devices.append({
                     'ip': parts[2],
-                    'mac': parts[1].lower(),
+                    'mac': mac,
                     'hostname': parts[3],
+                    'type': device_type,
                     'method': 'dhcp'
                 })
         return devices
 
     def parse_nmap_scan(self, nmap_output):
-        """Parse nmap scan output"""
+        """Parse nmap scan output with device identification"""
         devices = []
         current_ip = None
         current_mac = None
@@ -471,9 +550,11 @@ class MITMTool:
             elif "MAC Address:" in line:
                 current_mac = line.split("MAC Address: ")[1].split()[0].lower()
                 if current_ip and current_mac:
+                    device_type = self.get_device_type(current_mac)
                     devices.append({
                         'ip': current_ip,
                         'mac': current_mac,
+                        'type': device_type,
                         'method': 'nmap'
                     })
                     current_ip = None
@@ -481,6 +562,7 @@ class MITMTool:
             elif "Host is up" in line and current_ip and not current_mac:
                 devices.append({
                     'ip': current_ip,
+                    'type': 'Unknown',
                     'method': 'ping'
                 })
                 current_ip = None
@@ -525,7 +607,6 @@ class MITMTool:
             logger.error(f"WiFi scan failed: {str(e)}")
             return []
 
-    # ==================== Menu Functions ====================
     def show_main_menu(self):
         """Display the main menu with ASCII art"""
         os.system('clear' if os.name == 'posix' else 'cls')
@@ -554,7 +635,7 @@ class MITMTool:
         print("3. Return to Main Menu")
 
     def handle_wifi_menu(self):
-        """Handle WiFi scanning menu"""
+        """Handle WiFi scanning menu with device names"""
         wifi_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'wifi']
         if not wifi_ifaces:
             print("\nNo WiFi interfaces found!")
@@ -580,9 +661,11 @@ class MITMTool:
                 print("\nConnected WiFi Devices:")
                 for i, dev in enumerate(devices, 1):
                     print(f"{i}. IP: {dev.get('ip')}, MAC: {dev.get('mac')}")
+                    print(f"   Device Type: {dev.get('type', 'Unknown')}")
                     if 'hostname' in dev:
                         print(f"   Hostname: {dev.get('hostname')}")
                     print(f"   Detected via: {dev.get('method')}")
+                    print("")  # Blank line between devices
                 input("\nPress Enter to continue...")
                 
             elif choice == "3":
@@ -649,7 +732,6 @@ if __name__ == "__main__":
         
     tool = MITMTool()
     
-    # Detect interfaces and setup bridge if possible
     if tool.detect_interfaces():
         ethernet_ifaces = [iface for iface in tool.interfaces if tool.interfaces[iface]['type'] == 'ethernet']
         if len(ethernet_ifaces) >= 2:
@@ -666,5 +748,4 @@ if __name__ == "__main__":
         print("\nNo network interfaces detected")
         time.sleep(2)
     
-    # Start interactive menu
     tool.interactive_menu()
