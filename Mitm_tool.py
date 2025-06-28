@@ -9,6 +9,7 @@ import json
 import netifaces
 import requests
 import readline
+import re
 
 # ASCII Art
 ASCII_ART = r"""
@@ -100,7 +101,7 @@ class MITMTool:
         # Check for required tools
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
-            'bettercap', 'responder', 'tailscale'
+            'bettercap', 'responder', 'tailscale', 'iwlist'
         ]
         
         missing_tools = []
@@ -127,18 +128,19 @@ class MITMTool:
             interfaces = netifaces.interfaces()
             
             for iface in interfaces:
-                if iface.startswith('eth') or iface.startswith('en'):
+                if iface.startswith('eth') or iface.startswith('en') or iface.startswith('wlan'):
                     addrs = netifaces.ifaddresses(iface)
                     if netifaces.AF_INET in addrs:
                         ip_info = addrs[netifaces.AF_INET][0]
                         self.interfaces[iface] = {
                             'ip': ip_info.get('addr', ''),
                             'netmask': ip_info.get('netmask', ''),
-                            'mac': addrs[netifaces.AF_LINK][0]['addr'] if netifaces.AF_LINK in addrs else ''
+                            'mac': addrs[netifaces.AF_LINK][0]['addr'] if netifaces.AF_LINK in addrs else '',
+                            'type': 'wifi' if iface.startswith('wlan') else 'ethernet'
                         }
             
             logger.info(f"Detected interfaces: {json.dumps(self.interfaces, indent=2)}")
-            return len(self.interfaces) >= 2  # Need at least two interfaces for bridging
+            return len(self.interfaces) >= 1
             
         except Exception as e:
             logger.error(f"Error detecting interfaces: {str(e)}")
@@ -146,11 +148,13 @@ class MITMTool:
 
     def setup_bridge(self):
         """Bridge two Ethernet interfaces"""
-        if len(self.interfaces) < 2:
-            logger.error("Need at least two interfaces to create a bridge")
+        ethernet_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'ethernet']
+        
+        if len(ethernet_ifaces) < 2:
+            logger.error("Need at least two Ethernet interfaces to create a bridge")
             return False
             
-        iface1, iface2 = list(self.interfaces.keys())[:2]
+        iface1, iface2 = ethernet_ifaces[:2]
         
         try:
             # Disable IP on interfaces
@@ -364,6 +368,120 @@ class MITMTool:
             logger.error(f"Upload failed: {str(e)}")
             return False
 
+    # WiFi Functions
+    def get_wifi_interfaces(self):
+        """Get available WiFi interfaces"""
+        return [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'wifi']
+
+    def scan_wifi_networks(self, interface):
+        """Scan for available WiFi networks"""
+        try:
+            logger.info(f"Scanning WiFi networks on {interface}...")
+            scan_result = subprocess.run(
+                ["sudo", "iwlist", interface, "scan"],
+                capture_output=True, text=True
+            )
+            return self.parse_wifi_scan(scan_result.stdout)
+        except Exception as e:
+            logger.error(f"WiFi scan failed: {str(e)}")
+            return []
+
+    def parse_wifi_scan(self, scan_output):
+        """Parse iwlist scan output"""
+        networks = []
+        current_network = {}
+        
+        for line in scan_output.split('\n'):
+            line = line.strip()
+            
+            if "Cell" in line and "- Address:" in line:
+                if current_network:
+                    networks.append(current_network)
+                    current_network = {}
+                current_network['mac'] = line.split("Address: ")[1]
+            elif "ESSID:" in line:
+                current_network['ssid'] = line.split('"')[1]
+            elif "Channel:" in line:
+                current_network['channel'] = line.split(":")[1]
+            elif "Quality=" in line:
+                match = re.search(r'Quality=(\d+/\d+)', line)
+                if match:
+                    current_network['quality'] = match.group(1)
+                match = re.search(r'level=(-?\d+)', line)
+                if match:
+                    current_network['signal'] = match.group(1)
+        
+        if current_network:
+            networks.append(current_network)
+            
+        return networks
+
+    def get_connected_wifi_devices(self, interface):
+        """Get devices connected to WiFi network"""
+        try:
+            logger.info(f"Checking connected devices on {interface}...")
+            
+            # Get ARP table
+            arp_result = subprocess.run(
+                ["arp", "-a", "-i", interface],
+                capture_output=True, text=True
+            )
+            
+            # Get DHCP leases
+            dhcp_leases = []
+            try:
+                with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
+                    dhcp_leases = f.readlines()
+            except:
+                pass
+                
+            return self.parse_connected_devices(arp_result.stdout, dhcp_leases)
+            
+        except Exception as e:
+            logger.error(f"Failed to get connected devices: {str(e)}")
+            return []
+
+    def parse_connected_devices(self, arp_output, dhcp_leases):
+        """Parse ARP and DHCP data for connected devices"""
+        devices = []
+        
+        # Parse ARP table
+        for line in arp_output.split('\n'):
+            if "ether" in line:
+                parts = line.split()
+                devices.append({
+                    'ip': parts[1].strip('()'),
+                    'mac': parts[3],
+                    'interface': parts[5]
+                })
+        
+        # Add DHCP lease info
+        for lease in dhcp_leases:
+            parts = lease.strip().split()
+            if len(parts) >= 4:
+                mac = parts[1]
+                ip = parts[2]
+                hostname = parts[3]
+                
+                # Update existing device or add new
+                found = False
+                for device in devices:
+                    if device['mac'] == mac:
+                        device['hostname'] = hostname
+                        found = True
+                        break
+                
+                if not found:
+                    devices.append({
+                        'ip': ip,
+                        'mac': mac,
+                        'hostname': hostname,
+                        'interface': 'DHCP'
+                    })
+        
+        return devices
+
+    # Menu Functions
     def show_main_menu(self):
         """Display the main menu with ASCII art"""
         os.system('clear' if os.name == 'posix' else 'cls')
@@ -375,15 +493,64 @@ class MITMTool:
         print("2. MITM Attack Tools")
         print("3. Packet Capture & Analysis")
         print("4. Credential Harvesting")
-        print("5. System Configuration")
-        print("6. Stop All Attacks")
-        print("7. Exit")
+        print("5. WiFi Scanning Tools")
+        print("6. System Configuration")
+        print("7. Stop All Attacks")
+        print("8. Exit")
+
+    def show_wifi_menu(self):
+        """Display WiFi scanning menu"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        print(ASCII_ART)
+        print("\n" + "="*50)
+        print(" WIFI SCANNING MENU".center(50))
+        print("="*50)
+        print("\n1. Scan for WiFi Networks")
+        print("2. List Connected WiFi Devices")
+        print("3. Return to Main Menu")
+
+    def handle_wifi_menu(self):
+        """Handle WiFi scanning menu"""
+        wifi_ifaces = self.get_wifi_interfaces()
+        if not wifi_ifaces:
+            print("\nNo WiFi interfaces found!")
+            time.sleep(2)
+            return
+            
+        iface = wifi_ifaces[0]  # Use first WiFi interface
         
+        while True:
+            self.show_wifi_menu()
+            choice = input("\nSelect an option (1-3): ").strip()
+            
+            if choice == "1":
+                networks = self.scan_wifi_networks(iface)
+                print("\nAvailable WiFi Networks:")
+                for i, net in enumerate(networks, 1):
+                    print(f"{i}. {net.get('ssid', 'Hidden')} (MAC: {net.get('mac')})")
+                    print(f"   Channel: {net.get('channel')}, Signal: {net.get('signal')} dBm")
+                input("\nPress Enter to continue...")
+                
+            elif choice == "2":
+                devices = self.get_connected_wifi_devices(iface)
+                print("\nConnected WiFi Devices:")
+                for i, dev in enumerate(devices, 1):
+                    print(f"{i}. IP: {dev.get('ip')}, MAC: {dev.get('mac')}")
+                    if 'hostname' in dev:
+                        print(f"   Hostname: {dev.get('hostname')}")
+                input("\nPress Enter to continue...")
+                
+            elif choice == "3":
+                break
+            else:
+                print("Invalid choice")
+                time.sleep(1)
+
     def interactive_menu(self):
         """Main interactive menu"""
         while True:
             self.show_main_menu()
-            choice = input("\nSelect an option (1-7): ").strip()
+            choice = input("\nSelect an option (1-8): ").strip()
             
             try:
                 if choice == "1":
@@ -401,16 +568,18 @@ class MITMTool:
                     self.start_responder()
                     input("\nPress Enter to continue...")
                 elif choice == "5":
+                    self.handle_wifi_menu()
+                elif choice == "6":
                     print("\nConfiguration options:")
                     print("1. Toggle remote upload (current: {})".format(
                         "Enabled" if self.config.get("remote_upload") else "Disabled"))
                     print("2. Add allowed network")
                     config_choice = input("Select option: ").strip()
                     input("\nPress Enter to continue...")
-                elif choice == "6":
+                elif choice == "7":
                     self.stop_all_attacks()
                     input("\nPress Enter to continue...")
-                elif choice == "7":
+                elif choice == "8":
                     self.stop_all_attacks()
                     print("\nGoodbye!")
                     break
@@ -432,16 +601,22 @@ if __name__ == "__main__":
         
     tool = MITMTool()
     
-    # Detect interfaces and setup bridge
+    # Detect interfaces
     if tool.detect_interfaces():
-        if tool.setup_bridge():
-            print("\nNetwork bridge setup successfully")
-            time.sleep(2)
+        # Only setup bridge if we have Ethernet interfaces
+        ethernet_ifaces = [iface for iface in tool.interfaces if tool.interfaces[iface]['type'] == 'ethernet']
+        if len(ethernet_ifaces) >= 2:
+            if tool.setup_bridge():
+                print("\nNetwork bridge setup successfully")
+                time.sleep(2)
+            else:
+                print("\nFailed to setup bridge")
+                time.sleep(2)
         else:
-            print("\nFailed to setup bridge")
+            print("\nNot enough Ethernet interfaces for bridging")
             time.sleep(2)
     else:
-        print("\nNot enough interfaces detected")
+        print("\nNo network interfaces detected")
         time.sleep(2)
     
     # Start interactive menu
