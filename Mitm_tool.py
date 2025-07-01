@@ -12,6 +12,8 @@ import readline
 import re
 import urllib.request
 import shutil
+import socket
+from concurrent.futures import ThreadPoolExecutor
 
 # ASCII Art
 ASCII_ART = r"""
@@ -58,7 +60,6 @@ class MITMTool:
     def load_mac_vendors(self):
         """Load MAC vendor database for device identification"""
         try:
-            # Download if file doesn't exist or is older than 30 days
             if not os.path.exists(MAC_VENDOR_CACHE) or (time.time() - os.path.getmtime(MAC_VENDOR_CACHE)) > 2592000:
                 logger.info("Downloading MAC vendor database...")
                 urllib.request.urlretrieve(MAC_VENDOR_DB_URL, MAC_VENDOR_CACHE + ".new")
@@ -88,31 +89,155 @@ class MITMTool:
         if oui in self.mac_vendors:
             vendor = self.mac_vendors[oui]
             
-            # Common device mappings
             if "Apple" in vendor:
-                return "Apple Device"
+                return "Apple"
             elif "Samsung" in vendor:
-                return "Samsung Device"
+                return "Samsung"
             elif "Amazon" in vendor:
-                return "Amazon Device (Alexa/Echo)"
+                return "Amazon"
             elif "Google" in vendor:
-                return "Google Device (Nest/Home)"
+                return "Google"
             elif "Raspberry" in vendor:
                 return "Raspberry Pi"
             elif "TP-Link" in vendor:
-                return "TP-Link Device"
+                return "TP-Link"
             elif "Xiaomi" in vendor:
-                return "Xiaomi Device"
+                return "Xiaomi"
             elif "Dell" in vendor:
-                return "Dell Computer"
+                return "Dell"
             elif "LG" in vendor:
-                return "LG Device"
+                return "LG"
             elif "Sony" in vendor:
-                return "Sony Device"
+                return "Sony"
             elif "Microsoft" in vendor:
-                return "Microsoft Device"
+                return "Microsoft"
             return vendor
         return "Unknown"
+
+    def get_device_name(self, ip, mac):
+        """Try multiple methods to get human-readable device names"""
+        # Method 1: Check DHCP hostname first
+        dhcp_name = self.get_dhcp_name(mac)
+        if dhcp_name and dhcp_name.lower() not in ['unknown', 'localhost', 'android']:
+            return dhcp_name
+            
+        # Method 2: Try NetBIOS name resolution
+        netbios_name = self.get_netbios_name(ip)
+        if netbios_name:
+            return netbios_name
+            
+        # Method 3: Try mDNS (Bonjour)
+        mdns_name = self.get_mdns_name(ip)
+        if mdns_name:
+            return mdns_name
+            
+        # Method 4: Try LLMNR
+        llmnr_name = self.get_llmnr_name(ip)
+        if llmnr_name:
+            return llmnr_name
+            
+        # Fallback to MAC vendor + IP
+        return f"{self.get_device_type(mac)} Device"
+
+    def get_dhcp_name(self, mac):
+        """Extract hostname from DHCP leases"""
+        try:
+            with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 4 and parts[1].lower() == mac.lower():
+                        return parts[3]
+        except:
+            pass
+        return None
+
+    def get_netbios_name(self, ip):
+        """Get NetBIOS name using nmblookup"""
+        try:
+            result = subprocess.run(
+                ["nmblookup", "-A", ip],
+                capture_output=True, text=True, timeout=2
+            )
+            for line in result.stdout.split('\n'):
+                if "<00>" in line and "UNIQUE" in line:
+                    return line.split()[0]
+        except:
+            pass
+        return None
+
+    def get_mdns_name(self, ip):
+        """Try to resolve mDNS (Bonjour) name"""
+        try:
+            result = subprocess.run(
+                ["avahi-resolve", "-a", ip],
+                capture_output=True, text=True, timeout=2
+            )
+            if result.returncode == 0:
+                name = result.stdout.split()[1]
+                if name.endswith('.local'):
+                    return name.replace('.local', '')
+        except:
+            pass
+        return None
+
+    def get_llmnr_name(self, ip):
+        """Try LLMNR name resolution"""
+        try:
+            result = subprocess.run(
+                ["nmblookup", "-A", ip],
+                capture_output=True, text=True, timeout=2
+            )
+            for line in result.stdout.split('\n'):
+                if "<20>" in line:  # File Server Service
+                    return line.split()[0]
+        except:
+            pass
+        return None
+
+    def enhance_device_info(self, device):
+        """Add additional identification to device info"""
+        ip = device.get('ip')
+        mac = device.get('mac')
+        
+        if not ip or not mac:
+            return device
+            
+        # Add device name
+        device['name'] = self.get_device_name(ip, mac)
+        
+        # Add manufacturer from MAC
+        device['manufacturer'] = self.get_device_type(mac)
+        
+        # Try to get operating system info
+        device['os'] = self.guess_os(ip, mac)
+        
+        return device
+
+    def guess_os(self, ip, mac):
+        """Attempt to guess operating system"""
+        vendor = self.get_device_type(mac).lower()
+        
+        if 'apple' in vendor:
+            return 'macOS/iOS'
+        elif 'android' in vendor or 'google' in vendor:
+            return 'Android'
+        elif 'microsoft' in vendor:
+            return 'Windows'
+        elif 'linux' in vendor:
+            return 'Linux'
+            
+        # Try nmap OS detection if available
+        try:
+            result = subprocess.run(
+                ["nmap", "-O", "--osscan-limit", ip],
+                capture_output=True, text=True, timeout=5
+            )
+            if "OS details:" in result.stdout:
+                return result.stdout.split("OS details:")[1].split('\n')[0].strip()
+        except:
+            pass
+            
+        return 'Unknown'
 
     def load_config(self):
         """Load configuration from file"""
@@ -165,7 +290,7 @@ class MITMTool:
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
             'bettercap', 'responder', 'tailscale', 'iwlist',
-            'brctl', 'ifconfig', 'arp'
+            'brctl', 'ifconfig', 'arp', 'nmblookup', 'avahi-resolve'
         ]
         
         missing_tools = []
@@ -416,6 +541,7 @@ class MITMTool:
             logger.info(f"Checking connected devices on {interface}...")
             devices = []
             
+            # Method 1: ARP table
             try:
                 arp_result = subprocess.run(
                     ["arp", "-a", "-i", interface],
@@ -425,6 +551,7 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"ARP scan failed: {str(e)}")
 
+            # Method 2: DHCP leases
             try:
                 with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
                     dhcp_leases = f.readlines()
@@ -432,6 +559,7 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"DHCP leases read failed: {str(e)}")
 
+            # Method 3: nmap scan (active)
             try:
                 subnet = self.get_subnet(interface)
                 if subnet:
@@ -443,6 +571,7 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"Nmap scan failed: {str(e)}")
 
+            # Method 4: ping sweep (fallback)
             try:
                 if not devices and subnet:
                     ping_result = subprocess.run(
@@ -453,6 +582,7 @@ class MITMTool:
             except Exception as e:
                 logger.warning(f"Ping sweep failed: {str(e)}")
 
+            # Deduplicate devices by MAC address
             unique_devices = {}
             for device in devices:
                 if 'mac' in device and device['mac']:
@@ -460,7 +590,11 @@ class MITMTool:
                 elif 'ip' in device and device['ip']:
                     unique_devices[device['ip']] = device
 
-            return list(unique_devices.values())
+            # Enhance device information
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                enhanced_devices = list(executor.map(self.enhance_device_info, unique_devices.values()))
+                
+            return enhanced_devices
             
         except Exception as e:
             logger.error(f"Failed to get connected devices: {str(e)}")
@@ -473,11 +607,9 @@ class MITMTool:
             if "ether" in line:
                 parts = line.split()
                 mac = parts[3].lower()
-                device_type = self.get_device_type(mac)
                 devices.append({
                     'ip': parts[1].strip('()'),
                     'mac': mac,
-                    'type': device_type,
                     'interface': parts[5],
                     'method': 'arp'
                 })
@@ -489,13 +621,10 @@ class MITMTool:
         for lease in dhcp_leases:
             parts = lease.strip().split()
             if len(parts) >= 4:
-                mac = parts[1].lower()
-                device_type = self.get_device_type(mac)
                 devices.append({
                     'ip': parts[2],
-                    'mac': mac,
+                    'mac': parts[1].lower(),
                     'hostname': parts[3],
-                    'type': device_type,
                     'method': 'dhcp'
                 })
         return devices
@@ -512,11 +641,9 @@ class MITMTool:
             elif "MAC Address:" in line:
                 current_mac = line.split("MAC Address: ")[1].split()[0].lower()
                 if current_ip and current_mac:
-                    device_type = self.get_device_type(current_mac)
                     devices.append({
                         'ip': current_ip,
                         'mac': current_mac,
-                        'type': device_type,
                         'method': 'nmap'
                     })
                     current_ip = None
@@ -524,7 +651,6 @@ class MITMTool:
             elif "Host is up" in line and current_ip and not current_mac:
                 devices.append({
                     'ip': current_ip,
-                    'type': 'Unknown',
                     'method': 'ping'
                 })
                 current_ip = None
@@ -620,14 +746,16 @@ class MITMTool:
                 
             elif choice == "2":
                 devices = self.get_connected_wifi_devices(iface)
-                print("\nConnected WiFi Devices:")
+                print("\nConnected Devices:")
+                print("="*50)
                 for i, dev in enumerate(devices, 1):
-                    print(f"{i}. IP: {dev.get('ip')}, MAC: {dev.get('mac')}")
-                    print(f"   Device Type: {dev.get('type', 'Unknown')}")
-                    if 'hostname' in dev:
-                        print(f"   Hostname: {dev.get('hostname')}")
+                    print(f"{i}. {dev.get('name', 'Unknown Device')}")
+                    print(f"   IP: {dev.get('ip')}")
+                    print(f"   MAC: {dev.get('mac')}")
+                    print(f"   Manufacturer: {dev.get('manufacturer', 'Unknown')}")
+                    print(f"   OS: {dev.get('os', 'Unknown')}")
                     print(f"   Detected via: {dev.get('method')}")
-                    print("")
+                    print("="*50)
                 input("\nPress Enter to continue...")
                 
             elif choice == "3":
