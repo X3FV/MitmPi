@@ -493,7 +493,7 @@ class MITMTool:
             logger.error(f"Failed to start Responder: {str(e)}")
             return False
 
-    def start_bettercap(self, script_path=None(self, interface="mitm-bridge", script_path=None):
+    def start_bettercap(self, interface="mitm-bridge", script_path=None):
         """Start Bettercap with optional script for advanced MITM attacks"""
         try:
             cmd = ["sudo", "bettercap", "-iface", interface]
