@@ -490,18 +490,18 @@ class MITMTool:
             logger.error(f"Failed to start Bettercap: {str(e)}")
             return False
 
-    def start_dns_spoof(self, interface="mitm-bridge",    def start_dns_spoof(self, interface="mitm-bridge", hosts_file=None):
-        try:
-            cmd = ["sudo", "dnsspoof", "-i", interface]
-            if hosts_file:
-                cmd.extend(["-f", hosts_file])
-            self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
-            self.active_attacks.add('DNS Spoofing')
-            logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to start DNS spoofing: {str(e)}")
-            return False
+    def start_dns_spoof(self, interface="mitm-bridge", hosts_file=None):
+    try:
+        cmd = ["sudo", "dnsspoof", "-i", interface]
+        if hosts_file:
+            cmd.extend(["-f", hosts_file])
+        self.capture_processes['dnsspoof'] = subprocess.Popen(cmd)
+        self.active_attacks.add('DNS Spoofing')
+        logger.info(f"DNS spoofing started on {interface} with hosts file {hosts_file}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start DNS spoofing: {str(e)}")
+        return False
 
     def stop_all_attacks(self):
         for name, proc in self.capture_processes.items():
